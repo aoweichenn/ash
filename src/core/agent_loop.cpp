@@ -3,6 +3,8 @@
 #include <string>
 #include <utility>
 
+#include "ash/cancellation.hpp"
+
 namespace ash {
 
 namespace {
@@ -28,10 +30,14 @@ Task<AgentResult> run_agent(ModelProvider& provider,
                             const ToolRegistry& tools,
                             std::string task,
                             AgentOptions options,
-                            std::stop_token stop) {
+                            std::stop_token stop,
+                            StreamSink* sink) {
     AgentResult result;
     result.transcript.push_back(make_message(Role::kSystem, std::move(options.system_prompt)));
     result.transcript.push_back(make_message(Role::kUser, std::move(task)));
+
+    NullSink dropped;
+    StreamSink& events = sink != nullptr ? *sink : dropped;
 
     for (int step = 0; step < options.max_steps; ++step) {
         if (stop.stop_requested()) {
@@ -43,7 +49,15 @@ Task<AgentResult> run_agent(ModelProvider& provider,
         request.messages = result.transcript;
         request.tools = tools.specs();
 
-        const ChatResponse response = co_await provider.chat(std::move(request));
+        ChatResponse response;
+        try {
+            response = co_await provider.chat_stream(std::move(request), events, stop);
+        } catch (const Cancelled&) {
+            // A stop request that landed mid-call is an ending, not a failure:
+            // the run keeps what it had and says why it stopped.
+            result.stop_reason = "cancelled";
+            co_return result;
+        }
 
         result.usage.prompt_tokens += response.usage.prompt_tokens;
         result.usage.completion_tokens += response.usage.completion_tokens;

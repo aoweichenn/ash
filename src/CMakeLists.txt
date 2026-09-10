@@ -7,6 +7,8 @@ add_library(ash_core
     model/anthropic.cpp
     model/openai_compat.cpp
     model/provider.cpp
+    model/sse.cpp
+    model/stream.cpp
     record/decorators.cpp
     record/journal.cpp
     record/replay.cpp

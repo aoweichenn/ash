@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -80,6 +81,10 @@ struct ProviderConfig {
     long timeout_ms = 120000;
 };
 
+// Declared rather than defined here, because the event vocabulary depends on
+// the response types above and would otherwise include itself.
+struct StreamSink;
+
 class ModelProvider {
 public:
     virtual ~ModelProvider() = default;
@@ -88,6 +93,25 @@ public:
     [[nodiscard]] virtual const std::string& model() const noexcept = 0;
 
     virtual Task<ChatResponse> chat(ChatRequest request) = 0;
+
+    // The same call, with the model's output reported while it is still
+    // arriving.
+    //
+    // The contract is that this returns what chat() would have returned.
+    // Streaming is a view of a call, not a second kind of call: the journal
+    // records the assembled response either way, so a run that streamed and a
+    // run that did not are written down identically, and a replay cannot tell
+    // which one produced the recording.
+    //
+    // The default implementation calls chat() and then reports the whole answer
+    // through the sink. A provider without streaming support therefore degrades
+    // to "everything at the end" rather than to "nothing at all", and the
+    // replaying provider needs no override: it has no timing to reproduce.
+    //
+    // `stop` is checked while the request is in flight. chat() has no such
+    // parameter because there is nothing to watch -- a caller that wants to
+    // cancel work in progress is a caller watching it arrive.
+    virtual Task<ChatResponse> chat_stream(ChatRequest request, StreamSink& sink, std::stop_token stop = {});
 };
 
 // Serialization lives here so the recorder and the replayer agree on exactly

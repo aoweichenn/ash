@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "ash/model/provider.hpp"
+#include "ash/model/stream.hpp"
 #include "ash/task.hpp"
 #include "ash/tool/tool.hpp"
 
@@ -31,10 +32,16 @@ struct AgentResult {
 
 // Drives the model/tool loop until the model answers without asking for a
 // tool, the step budget runs out, or `stop` is requested.
+//
+// `sink` receives the model's output while it is still arriving, and a null sink
+// means the caller only wants the result. The loop always makes the streaming
+// call either way -- a sink is a place to put events, not a mode -- so there is
+// one path through the loop rather than two that have to be kept in step.
 [[nodiscard]] Task<AgentResult> run_agent(ModelProvider& provider,
                                           const ToolRegistry& tools,
                                           std::string task,
                                           AgentOptions options = {},
-                                          std::stop_token stop = {});
+                                          std::stop_token stop = {},
+                                          StreamSink* sink = nullptr);
 
 }  // namespace ash

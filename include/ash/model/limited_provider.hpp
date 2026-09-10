@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <stop_token>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -9,6 +10,7 @@
 
 #include "ash/io/async_semaphore.hpp"
 #include "ash/model/provider.hpp"
+#include "ash/model/stream.hpp"
 #include "ash/task.hpp"
 
 namespace ash {
@@ -53,6 +55,23 @@ public:
 
         try {
             ChatResponse response = co_await inner_->chat(std::move(request));
+            permits_.release();
+            co_return response;
+        } catch (...) {
+            permits_.release();
+            throw;
+        }
+    }
+
+    // A streamed call holds a permit for as long as the stream is open, which is
+    // the whole point: the limit is about how many requests the endpoint is
+    // serving, and a request does not stop counting because its answer arrives
+    // in pieces.
+    Task<ChatResponse> chat_stream(ChatRequest request, StreamSink& sink, std::stop_token stop = {}) override {
+        co_await permits_.acquire();
+
+        try {
+            ChatResponse response = co_await inner_->chat_stream(std::move(request), sink, stop);
             permits_.release();
             co_return response;
         } catch (...) {

@@ -1,13 +1,17 @@
 #include <memory>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "ash/cancellation.hpp"
 #include "ash/io/http_client.hpp"
 #include "ash/model/providers.hpp"
+#include "ash/model/stream.hpp"
 
 namespace ash {
 
@@ -82,12 +86,13 @@ nlohmann::json encode_messages(const std::vector<Message>& messages, std::string
     return encoded;
 }
 
-nlohmann::json encode_request(const ChatRequest& request) {
+nlohmann::json encode_request(const ChatRequest& request, bool stream) {
     std::string system;
     nlohmann::json body{{"model", request.model},
                         {"messages", encode_messages(request.messages, system)},
                         {"max_tokens", request.max_tokens.value_or(kDefaultMaxTokens)},
-                        {"temperature", request.temperature}};
+                        {"temperature", request.temperature},
+                        {"stream", stream}};
     if (!system.empty()) {
         body["system"] = std::move(system);
     }
@@ -151,7 +156,7 @@ public:
         http.headers = {"content-type: application/json",
                         "x-api-key: " + config_.api_key,
                         "anthropic-version: 2023-06-01"};
-        http.body = encode_request(request).dump();
+        http.body = encode_request(request, /*stream=*/false).dump();
 
         const HttpResponse response = client_.post(http);
         if (!response.error.empty()) {
@@ -162,6 +167,70 @@ public:
         }
 
         co_return decode_response(nlohmann::json::parse(response.body), config_.model);
+    }
+
+    Task<ChatResponse> chat_stream(ChatRequest request, StreamSink& sink, std::stop_token stop) override {
+        if (request.model.empty()) {
+            request.model = config_.model;
+        }
+        if (!request.max_tokens) {
+            request.max_tokens = config_.max_tokens;
+        }
+
+        HttpRequest http;
+        http.url = join_url(config_.base_url, "/messages");
+        http.timeout_ms = config_.timeout_ms;
+        http.headers = {"content-type: application/json",
+                        "accept: text/event-stream",
+                        "x-api-key: " + config_.api_key,
+                        "anthropic-version: 2023-06-01"};
+        http.body = encode_request(request, /*stream=*/true).dump();
+
+        SseDecoder framer;
+        AnthropicStreamDecoder decoder{config_.model};
+        StreamAssembler assembler;
+
+        auto consume = [&](const SseFrame& frame) {
+            for (StreamEvent& event : decoder.feed(frame)) {
+                assembler.feed(event);
+                sink.on_event(event);
+            }
+        };
+
+        const HttpResponse response = client_.post_stream(
+            http,
+            [&](std::string_view bytes) {
+                for (const SseFrame& frame : framer.feed(bytes)) {
+                    consume(frame);
+                }
+                return !decoder.finished();
+            },
+            stop);
+
+        if (response.aborted && !decoder.finished()) {
+            // Either the stop token fired or the sink refused more input; both
+            // are someone asking this call to stop, and neither is a failure.
+            throw Cancelled{};
+        }
+        if (!response.error.empty()) {
+            throw std::runtime_error{"transport error: " + response.error};
+        }
+        if (!response.ok() && !response.aborted) {
+            throw std::runtime_error{"http " + std::to_string(response.status) + ": " + response.body};
+        }
+        if (stop.stop_requested()) {
+            throw Cancelled{};
+        }
+
+        for (const SseFrame& frame : framer.finish()) {
+            consume(frame);
+        }
+        for (StreamEvent& event : decoder.finish()) {
+            assembler.feed(event);
+            sink.on_event(event);
+        }
+
+        co_return assembler.take();
     }
 
 private:

@@ -1,8 +1,23 @@
 #include "ash/model/provider.hpp"
 
+#include <stop_token>
 #include <string>
+#include <utility>
+
+#include "ash/model/stream.hpp"
 
 namespace ash {
+
+Task<ChatResponse> ModelProvider::chat_stream(ChatRequest request, StreamSink& sink, std::stop_token /*stop*/) {
+    ChatResponse response = co_await chat(std::move(request));
+    // The same projection a replay uses, so a provider that cannot stream and a
+    // provider that is not being streamed produce one kind of event sequence
+    // rather than two.
+    for (const StreamEvent& event : events_for(response)) {
+        sink.on_event(event);
+    }
+    co_return response;
+}
 
 std::string_view to_string(Role role) noexcept {
     switch (role) {

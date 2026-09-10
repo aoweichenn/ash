@@ -1,12 +1,16 @@
 #include <memory>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <nlohmann/json.hpp>
 
+#include "ash/cancellation.hpp"
 #include "ash/io/http_client.hpp"
 #include "ash/model/providers.hpp"
+#include "ash/model/stream.hpp"
 
 namespace ash {
 
@@ -48,11 +52,18 @@ nlohmann::json encode_messages(const std::vector<Message>& messages) {
     return encoded;
 }
 
-nlohmann::json encode_request(const ChatRequest& request) {
+nlohmann::json encode_request(const ChatRequest& request, bool stream) {
     nlohmann::json body{{"model", request.model},
                         {"messages", encode_messages(request.messages)},
                         {"temperature", request.temperature},
-                        {"stream", false}};
+                        {"stream", stream}};
+    if (stream) {
+        // Without this the final chunk carries no usage, and a streamed run
+        // would journal zero tokens where the same call without streaming
+        // journals the real count. That difference is the one thing streaming
+        // is not allowed to make.
+        body["stream_options"] = {{"include_usage", true}};
+    }
     if (request.max_tokens) {
         body["max_tokens"] = *request.max_tokens;
     }
@@ -70,14 +81,6 @@ nlohmann::json encode_request(const ChatRequest& request) {
     return body;
 }
 
-nlohmann::json parse_arguments(const std::string& raw) {
-    if (raw.empty()) {
-        return nlohmann::json::object();
-    }
-    nlohmann::json parsed = nlohmann::json::parse(raw, nullptr, false);
-    return parsed.is_discarded() ? nlohmann::json::object() : parsed;
-}
-
 ChatResponse decode_response(const nlohmann::json& body, const std::string& fallback_model) {
     const auto& choice = body.at("choices").at(0);
     const auto& message = choice.at("message");
@@ -93,7 +96,7 @@ ChatResponse decode_response(const nlohmann::json& body, const std::string& fall
             decoded.id = call.value("id", "");
             const auto& function = call.at("function");
             decoded.name = function.value("name", "");
-            decoded.arguments = parse_arguments(function.value("arguments", std::string{"{}"}));
+            decoded.arguments = detail::parse_tool_arguments(function.value("arguments", std::string{"{}"}));
             response.message.tool_calls.push_back(std::move(decoded));
         }
     }
@@ -126,7 +129,7 @@ public:
         http.url = join_url(config_.base_url, "/chat/completions");
         http.timeout_ms = config_.timeout_ms;
         http.headers = {"Content-Type: application/json", "Authorization: Bearer " + config_.api_key};
-        http.body = encode_request(request).dump();
+        http.body = encode_request(request, /*stream=*/false).dump();
 
         const HttpResponse response = client_.post(http);
         if (!response.error.empty()) {
@@ -137,6 +140,75 @@ public:
         }
 
         co_return decode_response(nlohmann::json::parse(response.body), config_.model);
+    }
+
+    Task<ChatResponse> chat_stream(ChatRequest request, StreamSink& sink, std::stop_token stop) override {
+        if (request.model.empty()) {
+            request.model = config_.model;
+        }
+        if (!request.max_tokens) {
+            request.max_tokens = config_.max_tokens;
+        }
+
+        HttpRequest http;
+        http.url = join_url(config_.base_url, "/chat/completions");
+        http.timeout_ms = config_.timeout_ms;
+        http.headers = {"Content-Type: application/json",
+                        "Accept: text/event-stream",
+                        "Authorization: Bearer " + config_.api_key};
+        http.body = encode_request(request, /*stream=*/true).dump();
+
+        SseDecoder framer;
+        OpenAiStreamDecoder decoder{config_.model};
+        StreamAssembler assembler;
+
+        auto consume = [&](const SseFrame& frame) {
+            for (StreamEvent& event : decoder.feed(frame)) {
+                assembler.feed(event);
+                sink.on_event(event);
+            }
+        };
+
+        const HttpResponse response = client_.post_stream(
+            http,
+            [&](std::string_view bytes) {
+                for (const SseFrame& frame : framer.feed(bytes)) {
+                    consume(frame);
+                }
+                // Reading stops at the sentinel rather than at the connection
+                // closing, so a server that keeps the stream open afterwards
+                // does not hold the run open with it.
+                return !decoder.finished();
+            },
+            stop);
+
+        if (response.aborted && !decoder.finished()) {
+            // Either the stop token fired or the sink refused more input; both
+            // are someone asking this call to stop, and neither is a failure.
+            throw Cancelled{};
+        }
+        if (!response.error.empty()) {
+            throw std::runtime_error{"transport error: " + response.error};
+        }
+        if (!response.ok() && !response.aborted) {
+            throw std::runtime_error{"http " + std::to_string(response.status) + ": " + response.body};
+        }
+        if (stop.stop_requested()) {
+            throw Cancelled{};
+        }
+
+        // A body that ended without a blank line, and a stream that ended
+        // without its sentinel, still carry whatever arrived: a truncated
+        // answer is worth more than none.
+        for (const SseFrame& frame : framer.finish()) {
+            consume(frame);
+        }
+        for (StreamEvent& event : decoder.finish()) {
+            assembler.feed(event);
+            sink.on_event(event);
+        }
+
+        co_return assembler.take();
     }
 
 private:

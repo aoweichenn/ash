@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ash/model/provider.hpp"
+#include "ash/model/stream.hpp"
 #include "ash/record/journal.hpp"
 #include "ash/record/replay.hpp"
 #include "ash/tool/tool.hpp"
@@ -25,6 +26,11 @@ public:
     [[nodiscard]] std::string_view name() const noexcept override;
     [[nodiscard]] const std::string& model() const noexcept override;
     Task<ChatResponse> chat(ChatRequest request) override;
+
+    // Overridden so that recording a run does not quietly cost the run its live
+    // output: the events are forwarded as they arrive, and the assembled call is
+    // written afterwards, exactly as chat() would have written it.
+    Task<ChatResponse> chat_stream(ChatRequest request, StreamSink& sink, std::stop_token stop = {}) override;
 
 private:
     std::unique_ptr<ModelProvider> inner_;

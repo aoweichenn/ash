@@ -48,6 +48,23 @@ Task<ChatResponse> RecordingProvider::chat(ChatRequest request) {
     co_return std::move(response);
 }
 
+Task<ChatResponse> RecordingProvider::chat_stream(ChatRequest request, StreamSink& sink, std::stop_token stop) {
+    // The same record, written the same way, whether or not the call streamed:
+    // the events are a view of the call and are not part of what a run is. That
+    // is what lets a streamed recording be replayed by code that has no idea it
+    // was ever streamed.
+    const Clock::time_point start = Clock::now();
+    ChatResponse response = co_await inner_->chat_stream(request, sink, stop);
+
+    ModelCallRecord record;
+    record.request = std::move(request);
+    record.response = response;
+    record.duration_us = elapsed_us(start);
+    journal_.append(actor_, std::move(record));
+
+    co_return response;
+}
+
 ReplayingProvider::ReplayingProvider(ReplayCursor& cursor, std::string name, std::string model)
     : cursor_(cursor), name_(std::move(name)), model_(std::move(model)) {}
 
