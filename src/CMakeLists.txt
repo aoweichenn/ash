@@ -6,6 +6,9 @@ add_library(ash_core
     model/anthropic.cpp
     model/openai_compat.cpp
     model/provider.cpp
+    record/decorators.cpp
+    record/journal.cpp
+    record/replay.cpp
     tool/builtin.cpp
     tool/registry.cpp)
 

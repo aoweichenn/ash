@@ -20,9 +20,14 @@ include(warnings)
 
 option(ASH_BUILD_TESTS "Build ash tests" ON)
 option(ASH_BUILD_BENCHMARKS "Build ash benchmarks" OFF)
+option(ASH_BUILD_CLI "Build the ash command-line tool" ON)
 option(ASH_WERROR "Treat compiler warnings as errors" OFF)
 
 add_subdirectory(src)
+
+if(ASH_BUILD_CLI)
+    add_subdirectory(apps/cli)
+endif()
 
 if(ASH_BUILD_TESTS)
     enable_testing()
