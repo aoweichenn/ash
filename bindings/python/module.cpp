@@ -23,4 +23,5 @@ PYBIND11_MODULE(_core, m) {
     ash::python::register_tools(m);
     ash::python::register_stream(m);
     ash::python::register_run(m);
+    ash::python::register_eval(m);
 }

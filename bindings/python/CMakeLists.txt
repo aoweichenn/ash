@@ -38,7 +38,8 @@ pybind11_add_module(_core
     provider.cpp
     tools.cpp
     stream.cpp
-    run.cpp)
+    run.cpp
+    eval.cpp)
 
 target_link_libraries(_core PRIVATE ash_core ash_eval)
 

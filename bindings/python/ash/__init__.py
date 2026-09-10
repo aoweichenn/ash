@@ -21,6 +21,7 @@ __all__ = [
     "ToolSet",
     "Usage",
     "anthropic",
+    "eval",
     "openai_compatible",
     "replay",
     "tool",
