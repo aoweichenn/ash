@@ -92,3 +92,58 @@ jobs:
         env:
           REPLAYS: 100
         run: ./tools/verify_replay.sh build/fedora-clang/apps/cli/ash
+
+  eval-offline:
+    name: eval (offline, no key)
+    runs-on: ubuntu-24.04
+    container: fedora:43
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          gcc-c++ cmake ninja-build libcurl-devel openssl-devel git
+
+      - name: Configure
+        run: cmake --preset fedora-clang
+
+      - name: Build
+        run: cmake --build --preset fedora-clang
+
+      # Every job replays a committed journal, so this grades a real agent run
+      # on every push and costs nothing. The baseline is committed too, so the
+      # diff is exercised rather than assumed -- a code change that breaks a
+      # check, or a fixture that was quietly re-recorded, both show up here.
+      # pipefail matters: without it the exit status would be tee's, and a
+      # failing eval would pass as long as it printed something.
+      - name: Grade the suite against the committed baseline
+        run: |
+          set -o pipefail
+          ./build/fedora-clang/apps/cli/ash eval \
+            --suite examples/suites/core.json \
+            --baseline eval/baseline/core.json \
+            --json eval-report.json | tee eval-output.txt
+
+      - name: Add the data table to the run summary
+        if: always()
+        run: |
+          {
+            echo '## Offline eval'
+            echo
+            echo 'Graded from committed journals: no API key, no network, no cost.'
+            echo
+            echo '```'
+            cat eval-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Kept even when the eval fails, since the report is how you find out why.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: |
+            eval-report.json
+            eval-output.txt

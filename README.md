@@ -103,6 +103,11 @@ ash eval --suite examples/suites/core.json --json baseline.json
 ash eval --suite examples/suites/core.json --baseline baseline.json
 ```
 
+The report is a pure function of the journals, so it can be committed: there is
+one under `eval/baseline/`, and CI grades every push against it. A code change
+that breaks a check, and a fixture that was quietly re-recorded, both surface
+as a `REGRESSED` job and a non-zero exit.
+
 The suite also runs under AddressSanitizer and UndefinedBehaviorSanitizer, with
 leak detection on — the journal and the `stop_source` plumbing hand ownership
 around enough that a leak is a real failure mode, not a hypothetical one:
@@ -166,7 +171,8 @@ Done:
   totals, and latency percentiles, behind `ash eval`. It replays committed
   journals, so it runs offline and costs nothing
 - Report files and `--baseline`, which diffs a run against an earlier one and
-  exits non-zero on a regression — including a job that was quietly deleted
+  exits non-zero on a regression — including a job that was quietly deleted.
+  CI grades every push against a committed baseline and archives the table
 - A price table, and per-call timings written into the journal, so a replayed
   run still reports the cost and latency the original run really had
 - 61 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under

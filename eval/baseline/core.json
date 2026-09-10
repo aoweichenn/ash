@@ -1,0 +1,37 @@
+{
+  "jobs": [
+    {
+      "completion_tokens": 357,
+      "cost_usd": 0.0010061999999999998,
+      "failures": [],
+      "id": "summary-openai-compatible",
+      "model_latency_us": 3739013,
+      "passed": true,
+      "prompt_tokens": 1926,
+      "steps": 2,
+      "stop_reason": "completed"
+    },
+    {
+      "completion_tokens": 336,
+      "cost_usd": 0.0006528,
+      "failures": [],
+      "id": "summary-anthropic",
+      "model_latency_us": 4022657,
+      "passed": true,
+      "prompt_tokens": 832,
+      "steps": 3,
+      "stop_reason": "completed"
+    }
+  ],
+  "model_call_latencies_us": [
+    914525,
+    1337190,
+    1487298,
+    908952,
+    873688,
+    846297,
+    1393720
+  ],
+  "suite": "core",
+  "version": 1
+}
