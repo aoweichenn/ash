@@ -111,6 +111,19 @@ std::vector<ash::Task<ash::ChatResponse>> calls_to(ash::ModelProvider& provider,
     return tasks;
 }
 
+// The same batch, made as streaming calls. `sink` has to outlive the tasks, so
+// it belongs to the caller rather than to this function.
+std::vector<ash::Task<ash::ChatResponse>> streams_to(ash::ModelProvider& provider,
+                                                     int count,
+                                                     ash::StreamSink& sink) {
+    std::vector<ash::Task<ash::ChatResponse>> tasks;
+    tasks.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        tasks.push_back(provider.chat_stream(ash::ChatRequest{}, sink));
+    }
+    return tasks;
+}
+
 }  // namespace
 
 TEST_CASE("the limiter caps how many calls are in flight", "[limited]") {
@@ -183,6 +196,36 @@ TEST_CASE("a failed call gives its permit back", "[limited]") {
 
 // A limit of zero is not a limit, it is a provider that can never be called,
 // and it would show up as a hang rather than as a mistake.
+TEST_CASE("a streamed call counts against the limit like any other", "[limited]") {
+    ash::ThreadPool pool{8};
+    ash::NullSink sink;
+
+    auto inner = std::make_unique<CountingProvider>(1, nullptr);
+    CountingProvider& counting = *inner;
+    ash::LimitedProvider provider{std::move(inner), 3};
+
+    // The limit is about how many requests the endpoint is serving, and a
+    // request does not stop counting because its answer arrives in pieces. A
+    // limiter that only guarded chat() would let a streaming caller open as
+    // many streams as it liked -- which is exactly the runaway the limiter is
+    // here to prevent.
+    REQUIRE_NOTHROW(ash::when_all(pool, streams_to(provider, 6, sink)));
+    CHECK(counting.peak() <= 3);
+}
+
+TEST_CASE("a failed stream gives its permit back", "[limited]") {
+    ash::ThreadPool pool{4};
+    ash::NullSink sink;
+
+    auto inner = std::make_unique<FailingProvider>();
+    ash::LimitedProvider provider{std::move(inner), 1};
+
+    // The streaming path has its own release, and a permit leaked there would
+    // only show up once someone streamed -- which is the kind of bug that
+    // survives a whole test suite that never streams.
+    REQUIRE_THROWS_AS(ash::when_all(pool, streams_to(provider, 4, sink)), std::runtime_error);
+}
+
 TEST_CASE("a limiter with no permits is refused", "[limited]") {
     auto inner = std::make_unique<CountingProvider>(1, nullptr);
     // Parenthesised: the comma inside the braces would otherwise read as a

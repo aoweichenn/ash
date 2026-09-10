@@ -38,9 +38,10 @@ ash::AgentOptions test_options() {
 }
 
 // Records a two-step run -- one tool call, two model calls -- to `journal_path`
-// and returns what the run produced. The journal is closed before this returns,
-// so callers can load it.
-ash::AgentResult record_two_step_run(const std::filesystem::path& journal_path) {
+// with whatever provider it is given, and returns what the run produced. The
+// journal is closed before this returns, so callers can load it.
+ash::AgentResult record_run_with(const std::filesystem::path& journal_path,
+                                 std::unique_ptr<ash::ModelProvider> model) {
     const std::string actor{kActor};
     const ash::AgentOptions options = test_options();
 
@@ -50,20 +51,45 @@ ash::AgentResult record_two_step_run(const std::filesystem::path& journal_path) 
     ash::Journal writer = ash::Journal::create(journal_path);
 
     ash::JournalHeader header;
-    header.provider = "scripted";
-    header.model = "scripted-model";
+    header.provider = std::string{model->name()};
+    header.model = model->model();
     header.task = std::string{kTask};
     header.system_prompt = options.system_prompt;
     header.max_steps = options.max_steps;
     writer.set_header(std::move(header));
 
-    ash::RecordingProvider provider{std::make_unique<ScriptedProvider>(two_step_script()), writer, actor};
+    ash::RecordingProvider provider{std::move(model), writer, actor};
     ash::ToolRegistry recording_tools = ash::make_recording_registry(live_tools, writer, actor);
 
     const ash::AgentResult result =
         ash::run_agent(provider, recording_tools, std::string{kTask}, options).sync_wait();
     REQUIRE(result.stop_reason == "completed");
     return result;
+}
+
+ash::AgentResult record_two_step_run(const std::filesystem::path& journal_path) {
+    return record_run_with(journal_path, std::make_unique<ScriptedProvider>(two_step_script()));
+}
+
+// Every line of a journal with the fields that legitimately vary between two
+// runs of the same task removed. Latency is a property of the machine and the
+// timestamp is a property of the clock, so a comparison that kept either would
+// only be testing that two runs happened to be identical in ways nobody
+// promised -- and would hide a real difference behind a flaky assertion.
+std::vector<nlohmann::json> journal_lines_without_timing(const std::filesystem::path& path) {
+    std::ifstream input{path};
+    std::vector<nlohmann::json> lines;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        nlohmann::json record = nlohmann::json::parse(line);
+        record.erase("duration_us");
+        record.erase("created_at");
+        lines.push_back(std::move(record));
+    }
+    return lines;
 }
 
 // Replays a journal with nothing but the journal itself.
@@ -115,6 +141,54 @@ TEST_CASE("a recorded run replays to an identical transcript") {
 
     CHECK_NOTHROW(cursor.verify_consumed());
     CHECK(cursor.consumed() == 3);  // two model calls plus one tool call
+}
+
+TEST_CASE("a streamed run and a plain run write the same journal") {
+    // The claim streaming has to earn: it is a view of a call, not a second
+    // kind of call. If these two journals differed, a streamed recording would
+    // be a recording of something else, and every eval comparison between a
+    // streamed and a non-streamed run would be measuring the recording format.
+    const TempDir dir;
+    const auto plain_path = dir / "plain.jsonl";
+    const auto streamed_path = dir / "streamed.jsonl";
+
+    record_run_with(plain_path, std::make_unique<ScriptedProvider>(two_step_script()));
+    record_run_with(streamed_path,
+                    std::make_unique<StreamingScriptedProvider>(two_step_script()));
+
+    const std::vector<nlohmann::json> plain = journal_lines_without_timing(plain_path);
+    const std::vector<nlohmann::json> streamed = journal_lines_without_timing(streamed_path);
+
+    // One header and three events: two model calls and one tool call.
+    REQUIRE(plain.size() == 4);
+    REQUIRE(streamed.size() == plain.size());
+    for (std::size_t index = 0; index < plain.size(); ++index) {
+        INFO("line " << index);
+        CHECK(plain[index] == streamed[index]);
+    }
+}
+
+TEST_CASE("a journal written by a streaming run replays like any other") {
+    const TempDir dir;
+    const auto journal_path = dir / "streamed.jsonl";
+    record_run_with(journal_path,
+                    std::make_unique<StreamingScriptedProvider>(two_step_script()));
+
+    const ash::Journal loaded = ash::Journal::load(journal_path);
+    ash::ReplayCursor cursor = make_cursor(loaded);
+    ash::ReplayingProvider provider{cursor, loaded.header().provider, loaded.header().model};
+    const ash::ToolRegistry replaying_tools = ash::make_replaying_registry(loaded, cursor, kActor);
+
+    // Nothing in the replay knows the recording was streamed, and it still
+    // rebuilds the same conversation.
+    const auto replayed =
+        ash::run_agent(provider, replaying_tools, loaded.header().task, test_options()).sync_wait();
+
+    CHECK(replayed.stop_reason == "completed");
+    REQUIRE(replayed.transcript.size() == 5);
+    CHECK(replayed.transcript[3].content == "ping");
+    CHECK(replayed.transcript[4].content == "the tool said ping");
+    CHECK_NOTHROW(cursor.verify_consumed());
 }
 
 TEST_CASE("the journal keeps a run's configuration so a replay can rebuild it") {

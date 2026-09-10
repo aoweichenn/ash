@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ash/model/provider.hpp"
+#include "test_support.hpp"
 
 namespace {
 
@@ -100,4 +101,48 @@ TEST_CASE("a chat response survives a round-trip", "[provider]") {
     const nlohmann::json encoded = original;
     REQUIRE(encoded.get<ash::ChatResponse>() == original);
     REQUIRE(original.usage.total_tokens() == 18);
+}
+
+TEST_CASE("a provider that cannot stream still answers a streaming call", "[provider]") {
+    // The base class folds: it makes the ordinary call and then reports the
+    // whole answer through the sink. That is what lets every existing provider
+    // -- and every test double -- serve a streaming caller without knowing
+    // streaming exists, and what makes "no streaming support" a degradation
+    // rather than a missing feature.
+    ash::test::ScriptedProvider provider{{ash::test::reply(ash::test::assistant_text("all at once"))}};
+    ash::test::CollectingSink sink;
+
+    const ash::ChatResponse response = provider.chat_stream(ash::ChatRequest{}, sink).sync_wait();
+
+    CHECK(response.message.content == "all at once");
+    CHECK(provider.requests.size() == 1);
+
+    // One event carrying the whole answer, not one per character: the fold is
+    // honest about being a fold, and a sink that wanted to render text as it
+    // arrived gets it all at the end rather than in fabricated pieces.
+    REQUIRE(sink.texts.size() == 1);
+    CHECK(sink.texts[0] == "all at once");
+    CHECK(sink.saw_done);
+    CHECK(sink.finish_reason == "stop");
+}
+
+TEST_CASE("the folding default reports an empty answer without inventing text", "[provider]") {
+    ash::ChatResponse tool_call;
+    tool_call.message.role = ash::Role::kAssistant;
+    tool_call.message.tool_calls.push_back(
+        ash::ToolCall{.id = "c1", .name = "echo", .arguments = {{"text", "x"}}});
+    tool_call.finish_reason = "tool_calls";
+    tool_call.model = "scripted-model";
+
+    ash::test::ScriptedProvider provider{{tool_call}};
+    ash::test::CollectingSink sink;
+
+    const ash::ChatResponse response = provider.chat_stream(ash::ChatRequest{}, sink).sync_wait();
+
+    // A response that is all tool call has no text, and the sink must not be
+    // handed an empty text event for it -- a renderer would print nothing and a
+    // test counting events would see one where there was no content.
+    CHECK(sink.texts.empty());
+    CHECK(sink.saw_done);
+    REQUIRE(response.message.tool_calls.size() == 1);
 }

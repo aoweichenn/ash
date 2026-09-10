@@ -11,11 +11,13 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "ash/model/provider.hpp"
+#include "ash/model/stream.hpp"
 #include "ash/task.hpp"
 #include "ash/tool/tool.hpp"
 
@@ -107,6 +109,97 @@ private:
     std::vector<ash::ChatResponse> script_;
     std::size_t next_ = 0;
     std::string model_ = "scripted-model";
+};
+
+// Replays a fixed script, but answers a streaming call the way an endpoint
+// does: in pieces, then a closing event.
+//
+// The text is split one character at a time on purpose. A test that only
+// compared the joined text could not tell this apart from a provider that sends
+// the whole answer in a single event at the end, and the whole point of the
+// seam is that the pieces arrive while the call is still running.
+class StreamingScriptedProvider final : public ash::ModelProvider {
+public:
+    explicit StreamingScriptedProvider(std::vector<ash::ChatResponse> script)
+        : script_(std::move(script)) {}
+
+    [[nodiscard]] std::string_view name() const noexcept override { return "scripted"; }
+    [[nodiscard]] const std::string& model() const noexcept override { return model_; }
+
+    ash::Task<ash::ChatResponse> chat(ash::ChatRequest request) override {
+        requests.push_back(std::move(request));
+        if (next_ >= script_.size()) {
+            throw std::runtime_error{"scripted provider ran out of responses"};
+        }
+        co_return script_[next_++];
+    }
+
+    ash::Task<ash::ChatResponse> chat_stream(ash::ChatRequest request,
+                                             ash::StreamSink& sink,
+                                             std::stop_token) override {
+        requests.push_back(std::move(request));
+        if (next_ >= script_.size()) {
+            throw std::runtime_error{"scripted provider ran out of responses"};
+        }
+        // Copied rather than moved out of the script: the caller may replay the
+        // same script, and a response that had been hollowed out would make the
+        // second run disagree with the first for no visible reason.
+        const ash::ChatResponse response = script_[next_++];
+
+        for (const char piece : response.message.content) {
+            sink.on_event(ash::TextDelta{std::string(1, piece)});
+        }
+        for (std::size_t index = 0; index < response.message.tool_calls.size(); ++index) {
+            const ash::ToolCall& call = response.message.tool_calls[index];
+            sink.on_event(ash::ToolCallDelta{static_cast<int>(index), call.id, call.name,
+                                             call.arguments.dump()});
+        }
+        if (response.usage.prompt_tokens != 0 || response.usage.completion_tokens != 0) {
+            sink.on_event(ash::UsageDelta{response.usage});
+        }
+        sink.on_event(ash::StreamDone{response.finish_reason, response.model});
+        co_return response;
+    }
+
+    std::vector<ash::ChatRequest> requests;
+
+private:
+    std::vector<ash::ChatResponse> script_;
+    std::size_t next_ = 0;
+    std::string model_ = "scripted-model";
+};
+
+// Records every event a streaming call handed it.
+//
+// The count matters as much as the text: a provider that produces "Hello" in
+// one event and a provider that produces it as "Hel" then "lo" both end with
+// the same text, and only the second is streaming. Tests that mean the second
+// assert on `texts`.
+class CollectingSink final : public ash::StreamSink {
+public:
+    void on_event(const ash::StreamEvent& event) override {
+        if (const auto* delta = std::get_if<ash::TextDelta>(&event)) {
+            texts.push_back(delta->text);
+        }
+        if (const auto* done = std::get_if<ash::StreamDone>(&event)) {
+            finish_reason = done->finish_reason;
+            saw_done = true;
+        }
+        events.push_back(event);
+    }
+
+    [[nodiscard]] std::string joined() const {
+        std::string all;
+        for (const std::string& piece : texts) {
+            all += piece;
+        }
+        return all;
+    }
+
+    std::vector<ash::StreamEvent> events;
+    std::vector<std::string> texts;
+    std::string finish_reason;
+    bool saw_done = false;
 };
 
 // A tool with no side effects, so tests stay hermetic.

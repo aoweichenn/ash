@@ -7,6 +7,8 @@ add_executable(ash_tests
     limited_provider_test.cpp
     provider_test.cpp
     record_test.cpp
+    sse_test.cpp
+    stream_test.cpp
     task_test.cpp
     thread_pool_test.cpp
     tool_test.cpp

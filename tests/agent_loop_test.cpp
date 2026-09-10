@@ -1,16 +1,46 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
 #include <stop_token>
 #include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "ash/cancellation.hpp"
 #include "ash/runtime.hpp"
 #include "ash/tool/builtin.hpp"
 #include "ash/tool/tool.hpp"
 #include "test_support.hpp"
 
 using namespace ash::test;
+
+namespace {
+
+// A model call cut off partway through, which is what a stop request looks like
+// to the loop once the transport has noticed it.
+class InterruptedProvider final : public ash::ModelProvider {
+public:
+    [[nodiscard]] std::string_view name() const noexcept override { return "interrupted"; }
+    [[nodiscard]] const std::string& model() const noexcept override { return model_; }
+
+    ash::Task<ash::ChatResponse> chat(ash::ChatRequest) override { throw ash::Cancelled{}; }
+
+    ash::Task<ash::ChatResponse> chat_stream(ash::ChatRequest,
+                                             ash::StreamSink& sink,
+                                             std::stop_token) override {
+        sink.on_event(ash::TextDelta{"par"});
+        sink.on_event(ash::TextDelta{"tial"});
+        throw ash::Cancelled{};
+    }
+
+private:
+    std::string model_ = "scripted-model";
+};
+
+}  // namespace
 
 TEST_CASE("agent loop returns as soon as the model stops calling tools") {
     ScriptedProvider provider{{reply(assistant_text("all done"))}};
@@ -143,4 +173,92 @@ TEST_CASE("an already-cancelled run never calls the model") {
     CHECK(provider.requests.empty());
     // The prompt is still recorded, so a trace shows what was asked for.
     CHECK(result.transcript.size() == 2);
+}
+
+TEST_CASE("the loop hands the model's output to the sink as it arrives") {
+    StreamingScriptedProvider provider{{reply(assistant_text("hello"))}};
+    const ash::ToolRegistry tools;
+    CollectingSink sink;
+
+    const auto result =
+        ash::run_agent(provider, tools, "greet", {}, std::stop_token{}, &sink).sync_wait();
+
+    CHECK(result.stop_reason == "completed");
+    // Five characters, five events: the loop is not collecting the answer and
+    // replaying it at the end.
+    CHECK(sink.texts.size() == 5);
+    CHECK(sink.joined() == "hello");
+    CHECK(sink.saw_done);
+    CHECK(sink.finish_reason == "stop");
+}
+
+TEST_CASE("every step of a run streams through the same sink") {
+    StreamingScriptedProvider provider{
+        {reply(assistant_tool_call("c1", "echo", {{"text", "ping"}})), reply(assistant_text("ok"))}};
+    ash::ToolRegistry tools;
+    tools.add(echo_tool());
+    CollectingSink sink;
+
+    const auto result =
+        ash::run_agent(provider, tools, "echo ping", {}, std::stop_token{}, &sink).sync_wait();
+
+    CHECK(result.stop_reason == "completed");
+    CHECK(result.steps.size() == 1);
+
+    // Two model calls, so two endings. The first step asked for a tool and said
+    // nothing, so its only content is the call fragment; the second said "ok".
+    std::size_t endings = 0;
+    std::size_t call_fragments = 0;
+    for (const ash::StreamEvent& event : sink.events) {
+        endings += std::holds_alternative<ash::StreamDone>(event) ? 1 : 0;
+        call_fragments += std::holds_alternative<ash::ToolCallDelta>(event) ? 1 : 0;
+    }
+
+    CHECK(sink.joined() == "ok");
+    CHECK(sink.texts.size() == 2);
+    CHECK(call_fragments == 1);
+    CHECK(endings == 2);
+    CHECK(sink.events.size() == 5);
+}
+
+TEST_CASE("a run with no sink still completes") {
+    // The sink is optional, and passing none must be the same run, not a
+    // different code path. A null sink is not a mode switch.
+    StreamingScriptedProvider provider{{reply(assistant_text("quiet"))}};
+    const ash::ToolRegistry tools;
+
+    const auto result = ash::run_agent(provider, tools, "greet").sync_wait();
+
+    CHECK(result.stop_reason == "completed");
+    REQUIRE(!result.transcript.empty());
+    CHECK(result.transcript.back().content == "quiet");
+}
+
+TEST_CASE("a model call cut short ends the run as cancelled, keeping what arrived") {
+    InterruptedProvider provider;
+    const ash::ToolRegistry tools;
+    CollectingSink sink;
+
+    const auto result =
+        ash::run_agent(provider, tools, "do work", {}, std::stop_token{}, &sink).sync_wait();
+
+    CHECK(result.stop_reason == "cancelled");
+    // The partial answer is not thrown away and not passed off as the model's
+    // final word: it reached the sink, and the transcript holds only the prompt.
+    CHECK(sink.joined() == "partial");
+    CHECK_FALSE(sink.saw_done);
+    REQUIRE(result.transcript.size() == 2);
+    CHECK(result.transcript[1].content == "do work");
+}
+
+TEST_CASE("a cancelled streaming call is not reported as a failure") {
+    // The distinction the Cancelled type exists for: a caller that only saw
+    // std::runtime_error could not tell a stopped run from a crashed one.
+    InterruptedProvider provider;
+    const ash::ToolRegistry tools;
+
+    ash::AgentOptions options;
+    options.max_steps = 3;
+
+    CHECK_NOTHROW(ash::run_agent(provider, tools, "do work", options).sync_wait());
 }
