@@ -98,8 +98,69 @@ TEST_CASE("agent loop runs a tool and feeds the result back") {
     CHECK(provider.requests[1].messages[3].tool_call_id == "call-1");
 }
 
-TEST_CASE("an unknown tool becomes an error result instead of an exception") {
-    ScriptedProvider provider{{reply(assistant_tool_call("call-1", "nope", nlohmann::json::object())),
+TEST_CASE("a run can continue an earlier conversation") {
+    ScriptedProvider provider{
+        {reply(assistant_text("first answer")), reply(assistant_text("second answer"))}};
+    const ash::ToolRegistry tools;
+
+    const auto first = ash::run_agent(provider, tools, "first question").sync_wait();
+    REQUIRE(first.transcript.size() == 3);
+
+    // What a caller keeps between turns: the exchange itself, without the system
+    // message, which the loop writes again on every run.
+    std::vector<ash::Message> history(first.transcript.begin() + 1, first.transcript.end());
+    const auto second =
+        ash::run_agent(provider, tools, std::move(history), "second question").sync_wait();
+
+    CHECK(second.stop_reason == "completed");
+    REQUIRE(second.transcript.size() == 5);
+    CHECK(second.transcript[0].role == ash::Role::kSystem);
+    CHECK(second.transcript[1].content == "first question");
+    CHECK(second.transcript[2].content == "first answer");
+    CHECK(second.transcript[3].content == "second question");
+    CHECK(second.transcript[4].content == "second answer");
+
+    // The hard evidence that this is a continuation and not a fresh start: the
+    // second request carried the whole conversation.
+    REQUIRE(provider.requests.size() == 2);
+    REQUIRE(provider.requests[1].messages.size() == 4);
+    CHECK(provider.requests[1].messages[1].content == "first question");
+    CHECK(provider.requests[1].messages[2].content == "first answer");
+    CHECK(provider.requests[1].messages[3].content == "second question");
+}
+
+TEST_CASE("history does not carry the system prompt, so the caller can change it") {
+    ScriptedProvider provider{{reply(assistant_text("one")), reply(assistant_text("two"))}};
+    const ash::ToolRegistry tools;
+
+    const auto first = ash::run_agent(provider, tools, "hello").sync_wait();
+    std::vector<ash::Message> history(first.transcript.begin() + 1, first.transcript.end());
+
+    ash::AgentOptions options;
+    options.system_prompt = "you are someone else now";
+    const auto second =
+        ash::run_agent(provider, tools, std::move(history), "again", options).sync_wait();
+
+    CHECK(second.transcript[0].content == "you are someone else now");
+    REQUIRE(provider.requests.size() == 2);
+    CHECK(provider.requests[1].messages[0].content == "you are someone else now");
+}
+
+TEST_CASE("continuing with an empty history is a fresh conversation") {
+    // The overload has to degrade to the ordinary case rather than open on a
+    // transcript with a hole in it.
+    ScriptedProvider provider{{reply(assistant_text("hi"))}};
+    const ash::ToolRegistry tools;
+
+    const auto result =
+        ash::run_agent(provider, tools, std::vector<ash::Message>{}, "hello").sync_wait();
+
+    REQUIRE(result.transcript.size() == 3);
+    CHECK(result.transcript[0].role == ash::Role::kSystem);
+    CHECK(result.transcript[1].content == "hello");
+}
+
+TEST_CASE("an unknown tool becomes an error result instead of an exception") {    ScriptedProvider provider{{reply(assistant_tool_call("call-1", "nope", nlohmann::json::object())),
                                reply(assistant_text("recovered"))}};
     const ash::ToolRegistry tools;
 

@@ -24,22 +24,22 @@ Message make_tool_message(std::string call_id, std::string content) {
     return message;
 }
 
-}  // namespace
-
-Task<AgentResult> run_agent(ModelProvider& provider,
-                            const ToolRegistry& tools,
-                            std::string task,
-                            AgentOptions options,
-                            std::stop_token stop,
-                            StreamSink* sink) {
+// The loop itself, handed a conversation that is already open. Both entry points
+// below differ only in the messages they start from, so nothing past this line
+// has to know which one ran.
+Task<AgentResult> run_conversation(ModelProvider& provider,
+                                   const ToolRegistry& tools,
+                                   std::vector<Message> transcript,
+                                   int max_steps,
+                                   std::stop_token stop,
+                                   StreamSink* sink) {
     AgentResult result;
-    result.transcript.push_back(make_message(Role::kSystem, std::move(options.system_prompt)));
-    result.transcript.push_back(make_message(Role::kUser, std::move(task)));
+    result.transcript = std::move(transcript);
 
     NullSink dropped;
     StreamSink& events = sink != nullptr ? *sink : dropped;
 
-    for (int step = 0; step < options.max_steps; ++step) {
+    for (int step = 0; step < max_steps; ++step) {
         if (stop.stop_requested()) {
             result.stop_reason = "cancelled";
             co_return result;
@@ -91,6 +91,40 @@ Task<AgentResult> run_agent(ModelProvider& provider,
 
     result.stop_reason = "max_steps";
     co_return result;
+}
+
+}  // namespace
+
+Task<AgentResult> run_agent(ModelProvider& provider,
+                            const ToolRegistry& tools,
+                            std::string task,
+                            AgentOptions options,
+                            std::stop_token stop,
+                            StreamSink* sink) {
+    const int max_steps = options.max_steps;
+    std::vector<Message> opening;
+    opening.reserve(2);
+    opening.push_back(make_message(Role::kSystem, std::move(options.system_prompt)));
+    opening.push_back(make_message(Role::kUser, std::move(task)));
+    return run_conversation(provider, tools, std::move(opening), max_steps, stop, sink);
+}
+
+Task<AgentResult> run_agent(ModelProvider& provider,
+                            const ToolRegistry& tools,
+                            std::vector<Message> history,
+                            std::string task,
+                            AgentOptions options,
+                            std::stop_token stop,
+                            StreamSink* sink) {
+    const int max_steps = options.max_steps;
+    std::vector<Message> opening;
+    opening.reserve(history.size() + 2);
+    opening.push_back(make_message(Role::kSystem, std::move(options.system_prompt)));
+    for (Message& message : history) {
+        opening.push_back(std::move(message));
+    }
+    opening.push_back(make_message(Role::kUser, std::move(task)));
+    return run_conversation(provider, tools, std::move(opening), max_steps, stop, sink);
 }
 
 }  // namespace ash

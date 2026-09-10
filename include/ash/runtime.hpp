@@ -44,4 +44,18 @@ struct AgentResult {
                                           std::stop_token stop = {},
                                           StreamSink* sink = nullptr);
 
+// Continues a conversation instead of starting one. `history` is the body of an
+// earlier exchange -- everything AgentResult::transcript held except its opening
+// system message -- so a caller can hand a run its own result back and keep
+// talking. The loop still opens with options.system_prompt, which keeps the
+// prompt the caller's to change between turns rather than something buried in
+// the history it is handed.
+[[nodiscard]] Task<AgentResult> run_agent(ModelProvider& provider,
+                                          const ToolRegistry& tools,
+                                          std::vector<Message> history,
+                                          std::string task,
+                                          AgentOptions options = {},
+                                          std::stop_token stop = {},
+                                          StreamSink* sink = nullptr);
+
 }  // namespace ash
