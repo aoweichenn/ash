@@ -25,16 +25,67 @@
 
 namespace ash::cli {
 
-// One line of a tool result, so a long listing does not bury the transcript.
-[[nodiscard]] inline std::string summarize(std::string_view text, std::size_t limit = 88) {
-    const auto newline = text.find('\n');
-    std::string_view line = newline == std::string_view::npos ? text : text.substr(0, newline);
-    const bool clipped = line.size() > limit || newline != std::string_view::npos;
-    if (line.size() > limit) {
-        line = line.substr(0, limit);
+// `run` prints one line per tool result: its transcript is a log to scan.
+constexpr std::size_t kResultSummaryLimit = 88;
+constexpr std::size_t kResultSummaryLines = 1;
+
+// The session prints a short block instead. A command's output is the thing
+// whoever typed the command is watching for, and a one-line summary of `ls`
+// shows them the first file and nothing else.
+constexpr std::size_t kResultPreviewLines = 6;
+
+// The first `lines` lines of a tool result, each clipped to `limit` columns, so
+// a long listing does not bury the transcript.
+//
+// The one-line form is spelled out rather than expressed as the general case,
+// because it is what `run` has always printed and the recorded golden outputs
+// are compared byte for byte -- including the detail that a trailing newline
+// counts as a clip and a single short line with no newline at all does not.
+[[nodiscard]] inline std::string summarize(std::string_view text, std::size_t limit = kResultSummaryLimit,
+                                           std::size_t lines = kResultSummaryLines) {
+    if (lines <= 1) {
+        const auto newline = text.find('\n');
+        std::string_view line = newline == std::string_view::npos ? text : text.substr(0, newline);
+        const bool clipped = line.size() > limit || newline != std::string_view::npos;
+        if (line.size() > limit) {
+            line = line.substr(0, limit);
+        }
+        std::string out{line};
+        if (clipped) {
+            out += " ...";
+        }
+        return out;
     }
-    std::string out{line};
-    if (clipped) {
+
+    std::string out;
+    std::size_t start = 0;
+    for (std::size_t shown = 0; shown < lines; ++shown) {
+        const std::size_t newline = text.find('\n', start);
+        std::string_view line =
+            newline == std::string_view::npos ? text.substr(start) : text.substr(start, newline - start);
+        bool clipped = line.size() > limit;
+        if (clipped) {
+            line = line.substr(0, limit);
+        }
+        if (!out.empty()) {
+            out += '\n';
+        }
+        out += line;
+
+        if (newline == std::string_view::npos) {
+            if (clipped) {
+                out += " ...";
+            }
+            return out;
+        }
+        start = newline + 1;
+    }
+
+    // Whatever follows the last line shown is what the " ..." stands for. A
+    // result that ended in a newline right here has nothing after it, and
+    // saying it was clipped when nothing was dropped would be a small lie in
+    // the one place the user is reading to find out what happened.
+    if (start < text.size()) {
         out += " ...";
     }
     return out;
@@ -84,7 +135,9 @@ private:
 // too, and the loop is not asked to know about it.
 class PrintingTool final : public ash::Tool {
 public:
-    explicit PrintingTool(std::shared_ptr<ash::Tool> inner) : inner_(std::move(inner)) {}
+    explicit PrintingTool(std::shared_ptr<ash::Tool> inner, std::size_t limit = kResultSummaryLimit,
+                          std::size_t lines = kResultSummaryLines)
+        : inner_(std::move(inner)), limit_(limit), lines_(lines) {}
 
     [[nodiscard]] std::string_view name() const noexcept override { return inner_->name(); }
 
@@ -97,18 +150,22 @@ public:
     ash::Task<ash::ToolResult> invoke(const nlohmann::json& arguments, std::stop_token stop) const override {
         std::cout << "  -> " << name() << " " << summarize(arguments.dump(), 64) << "\n" << std::flush;
         ash::ToolResult result = co_await inner_->invoke(arguments, stop);
-        std::cout << "  <- " << summarize(result.content) << "\n" << std::flush;
+        std::cout << "  <- " << summarize(result.content, limit_, lines_) << "\n" << std::flush;
         co_return result;
     }
 
 private:
     std::shared_ptr<ash::Tool> inner_;
+    std::size_t limit_;
+    std::size_t lines_;
 };
 
-[[nodiscard]] inline ash::ToolRegistry make_printing_registry(const ash::ToolRegistry& tools) {
+[[nodiscard]] inline ash::ToolRegistry make_printing_registry(
+    const ash::ToolRegistry& tools, std::size_t limit = kResultSummaryLimit,
+    std::size_t lines = kResultSummaryLines) {
     ash::ToolRegistry printing;
     for (const auto& tool : tools.tools()) {
-        printing.add(std::make_shared<PrintingTool>(tool));
+        printing.add(std::make_shared<PrintingTool>(tool, limit, lines));
     }
     return printing;
 }
