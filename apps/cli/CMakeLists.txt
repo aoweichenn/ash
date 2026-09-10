@@ -1,4 +1,6 @@
-add_executable(ash main.cpp)
+add_executable(ash
+    chat.cpp
+    main.cpp)
 
 target_link_libraries(ash PRIVATE ash_core ash_eval)
 

@@ -31,6 +31,7 @@ struct RunOptions {
     std::string model;
     std::string system_prompt;
     std::string journal_path;
+    std::string mode;  // the session's; empty means the default
     int max_steps = kDefaultMaxSteps;
     int max_tokens = 0;  // 0 means "let the provider decide"
     bool stream = false;
@@ -40,11 +41,16 @@ inline void print_usage() {
     std::cout << R"(ash -- a deterministic agent runtime
 
 usage:
-  ash run [options] <task>       run an agent, optionally recording a journal
+  ash                            start a session in the current directory
+  ash run [options] <task>       run one task, optionally recording a journal
   ash replay <journal>           re-run a recorded run offline, with no API key
   ash eval [options]             grade a suite of recorded runs, offline
   ash version                    print the version
   ash help                       print this message
+
+options for `chat` (and for a bare `ash`):
+  the same as `run` below, minus --task and --journal, plus --mode. Type /help
+  once you are in one.
 
 options for `eval`:
   --suite <path>         the suite to run (required)
@@ -63,6 +69,7 @@ options for `run`:
   --max-steps <n>        model turns before giving up, default 16
   --max-tokens <n>       response token cap, default provider-chosen
   --stream               print the answer as the model writes it
+  --no-stream            the opposite, for a wrapper that always passes --stream
 
 examples:
   export ASH_API_KEY=sk-...
@@ -90,7 +97,19 @@ examples:
 
 enum class ParseResult { kOk, kHelp, kError };
 
-inline ParseResult parse_run_options(const std::vector<std::string>& args, RunOptions& options) {
+// The usage text belongs to the command, so the command passes it in. `run` and
+// the session accept overlapping flags with different defaults and different
+// requirements, and a parser that printed one command's help from inside the
+// other would be a bug nobody finds until they type --help.
+using UsageFn = void (*)();
+
+// `require_task` is the one difference that is not a default: a command that
+// takes a task has to be told it is missing one, and a session that takes none
+// must not be.
+inline ParseResult parse_run_options(const std::vector<std::string>& args,
+                                    RunOptions& options,
+                                    bool require_task,
+                                    UsageFn print_usage) {
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string& arg = args[i];
 
@@ -137,8 +156,12 @@ inline ParseResult parse_run_options(const std::vector<std::string>& args, RunOp
             if (!take_int(options.max_steps)) return ParseResult::kError;
         } else if (arg == "--max-tokens") {
             if (!take_int(options.max_tokens)) return ParseResult::kError;
+        } else if (arg == "--mode") {
+            if (!take_value(options.mode)) return ParseResult::kError;
         } else if (arg == "--stream") {
             options.stream = true;
+        } else if (arg == "--no-stream") {
+            options.stream = false;
         } else if (!arg.empty() && arg.front() == '-' && arg != "-") {
             std::cerr << "ash: unknown option '" << arg << "'\n";
             return ParseResult::kError;
@@ -150,7 +173,7 @@ inline ParseResult parse_run_options(const std::vector<std::string>& args, RunOp
         }
     }
 
-    if (options.task.empty()) {
+    if (require_task && options.task.empty()) {
         std::cerr << "ash: a task is required\n\n";
         print_usage();
         return ParseResult::kError;

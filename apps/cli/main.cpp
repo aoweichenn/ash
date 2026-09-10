@@ -21,6 +21,7 @@
 #include "ash/tool/builtin.hpp"
 #include "ash/tool/tool.hpp"
 #include "ash/version.hpp"
+#include "chat.hpp"
 #include "console.hpp"
 #include "options.hpp"
 #include "report.hpp"
@@ -48,7 +49,7 @@ int run_command(const std::vector<std::string>& args) {
     options.model = env_or("ASH_MODEL", std::string{kDefaultModel});
     options.api_key = env_or("ASH_API_KEY", "");
 
-    switch (parse_run_options(args, options)) {
+    switch (parse_run_options(args, options, /*require_task=*/true, print_usage)) {
         case ParseResult::kHelp:
             return 0;
         case ParseResult::kError:
@@ -57,6 +58,13 @@ int run_command(const std::vector<std::string>& args) {
             break;
     }
 
+    if (!options.mode.empty()) {
+        // Accepting and ignoring it would be worse than refusing it: a run has
+        // nobody to ask, so a mode here would read as a promise that nothing in
+        // this process is going to keep.
+        std::cerr << "ash: --mode is for the session (`ash`), not for `run`\n";
+        return 2;
+    }
     if (options.api_key.empty()) {
         std::cerr << "ash: no API key. Export ASH_API_KEY or pass --api-key.\n";
         return 2;
@@ -328,8 +336,31 @@ int eval_command(const std::vector<std::string>& args) {
     return status;
 }
 
+// Whether this invocation is the session rather than one of the named commands.
+//
+// A bare `ash` is the session, and so is `ash --model x`: a session takes the
+// flags a run takes, so insisting on the word `chat` first would mean asking
+// people to remember a command name that tells them nothing. Anything else
+// beginning with a dash is an option rather than a command and belongs to the
+// session for the same reason -- except the three that are about the program as
+// a whole, because someone typing `ash --help` is asking what ash is, not how to
+// configure one session.
+[[nodiscard]] bool is_session_invocation(const std::vector<std::string>& args) {
+    if (args.empty()) {
+        return true;
+    }
+    const std::string& first = args.front();
+    if (first.size() < 2 || first.front() != '-') {
+        return false;
+    }
+    return first != "-h" && first != "--help" && first != "--version";
+}
+
 int dispatch(const std::vector<std::string>& args) {
     const std::string& command = args.front();
+    if (command == "chat") {
+        return ash::cli::chat_command(args);
+    }
     if (command == "run") {
         return run_command(args);
     }
@@ -360,10 +391,9 @@ int dispatch(const std::vector<std::string>& args) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const std::vector<std::string> args(argv + 1, argv + argc);
-    if (args.empty()) {
-        print_usage();
-        return 2;
+    std::vector<std::string> args(argv + 1, argv + argc);
+    if (is_session_invocation(args)) {
+        args.insert(args.begin(), "chat");
     }
 
     try {
