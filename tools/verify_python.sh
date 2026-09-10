@@ -26,7 +26,8 @@
 #   7. a cancelled run ends as cancelled and keeps what it had
 #   8. cancelling before the first token stops a run that would otherwise have
 #      waited out its two-minute timeout
-#   9. an eval suite run from Python agrees with the report the CLI writes
+#   9. Ctrl-C, with no token and no callback, does the same thing
+#  10. an eval suite run from Python agrees with the report the CLI writes
 #
 # and then the pytest suite, which is the same gate at finer grain.
 
@@ -84,6 +85,7 @@ established rather than one it was told.
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -395,6 +397,38 @@ require(quiet.stop_reason == "cancelled", "the run against a silent server ended
 require(elapsed < 30, "cancelling before the first token took %.1fs" % elapsed)
 
 check("cancelling before the first token stops a run that would have waited out its timeout")
+
+# Ctrl-C, against the same silent socket. CPython can only raise
+# KeyboardInterrupt at a bytecode boundary in the main thread, and a run is
+# inside libcurl with the GIL released from its first byte to its last, so
+# without the run taking the signal this would wait out the two-minute timeout
+# and only then raise -- which is what makes it worth a check rather than a
+# sentence.
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", 0))
+listener.listen(8)
+silent_port = listener.getsockname()[1]
+
+timer = threading.Timer(0.5, os.kill, [os.getpid(), signal.SIGINT])
+timer.start()
+started = time.time()
+interrupted = False
+try:
+    ash.Agent(provider("http://127.0.0.1:%d/v1" % silent_port), file_tools()).run("say hi")
+except KeyboardInterrupt:
+    interrupted = True
+finally:
+    # Cancelled rather than left to fire, so that a run which failed early
+    # cannot leave a signal arriving after the run put the handler back.
+    timer.cancel()
+    elapsed = time.time() - started
+    listener.close()
+
+require(interrupted, "Ctrl-C did not reach the run as KeyboardInterrupt")
+require(elapsed < 30, "Ctrl-C took %.1fs to stop the run" % elapsed)
+
+check("Ctrl-C stops a run that would otherwise have waited out its timeout")
 
 # 7. The eval harness, from Python, against the report the CLI writes.
 

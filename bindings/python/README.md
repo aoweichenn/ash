@@ -87,8 +87,9 @@ embedder gets.
   makes dropping a Python reference safe while the interpreter is shutting down.
 - `provider.*`, `tools.*` — the provider factories, `@ash.tool`, `ToolSet`, and
   the schema derivation.
-- `stream.*` — `CancelToken` and the sink that forwards events to a Python
-  callback.
+- `stream.*` — `CancelToken`, `InterruptWatch` (which takes SIGINT for the length
+  of a run so that Ctrl-C stops it), and the sink that forwards events to a
+  Python callback.
 - `run.*` — `Agent`, `run()`, and `replay()`.
 - `eval.*` — the eval harness.
 

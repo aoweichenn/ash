@@ -8,6 +8,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <thread>
 
 #include <pybind11/pybind11.h>
 
@@ -38,6 +39,51 @@ public:
 
 private:
     std::stop_source source_;
+};
+
+// Takes SIGINT for the length of a run, so that Ctrl-C stops the run.
+//
+// CPython raises KeyboardInterrupt from its own C signal handler by tripping a
+// flag that the main thread checks at a bytecode boundary. A run never reaches
+// one: from the first byte of the request to the last it is inside libcurl with
+// the GIL released, so Ctrl-C during a run does nothing at all until the run is
+// over -- which, for an endpoint that accepted the connection and then went
+// quiet, is the full two-minute request timeout.
+//
+// So a run takes the signal and gives it back. The handler does the only thing
+// a signal handler may do -- set a flag -- and a watchdog thread turns that flag
+// into request_stop(), the same call a timer or a failing callback would have
+// made. Nothing here needs the main thread to do anything, which is the point:
+// the main thread is the one that is blocked. The watchdog is a plain
+// std::thread that never touches Python, so it does not become a second place
+// from which a callback could be made.
+//
+// Installed only where it is safe to install. The run has to be on the main
+// thread, because that is the only thread a signal is delivered to, and taking
+// the signal on a worker would take it away from the thread that owns it. And
+// the program's own handler for SIGINT has to be the default one: a program
+// that installed a handler is using the signal for something, and a library
+// that replaced it would be making that decision on the program's behalf.
+//
+// Requires the GIL, which is why it is built before the run releases it.
+class InterruptWatch {
+public:
+    explicit InterruptWatch(CancelToken& token);
+    ~InterruptWatch();
+
+    InterruptWatch(const InterruptWatch&) = delete;
+    InterruptWatch& operator=(const InterruptWatch&) = delete;
+
+    // Whether SIGINT arrived while the watch was up, whether or not the run got
+    // as far as noticing it. False when no watch was installed: a signal nobody
+    // was holding is not this object's to report.
+    [[nodiscard]] bool interrupted() const noexcept;
+
+private:
+    CancelToken& token_;
+    PyOS_sighandler_t previous_ = nullptr;
+    bool installed_ = false;
+    std::jthread watchdog_;
 };
 
 // Delivers a call while it is still arriving.

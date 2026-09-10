@@ -208,6 +208,14 @@ is the one where it has not: the token reaches libcurl's progress callback, so
 a run waiting on a silent socket stops in about a second rather than at its
 two-minute timeout.
 
+Ctrl-C stops a run for the same reason and arrives as `KeyboardInterrupt`, which
+it would not on its own: a run holds the interpreter in libcurl with the GIL
+released from its first byte to its last, and CPython raises that exception only
+at a bytecode boundary in the main thread. So a run takes the signal for its own
+length and gives it back afterwards — on the main thread only, and only when the
+program has not installed a handler of its own, since a program that has one is
+using the signal for something.
+
 The eval harness is reachable too, so a project can keep its grading rules in a
 suite file and run them from its own test suite:
 
@@ -348,11 +356,11 @@ Done:
   callback, a stopped transfer is reported as stopped rather than failed, and a
   run cut short ends as `cancelled` keeping what it had produced
 - pybind11 bindings: replay, provider and agent, Python functions as tools,
-  streaming callbacks, cancellation, and the eval harness, all behind one
+  streaming callbacks, cancellation, Ctrl-C, and the eval harness, all behind one
   `ASH_BUILD_PYTHON` that is off by default. A Python tool's schema is derived
   from its signature, a recording made from Python replays like any other, and
   `tools/verify_python.sh` is the end-to-end check
-- 134 tests under `ctest`: 133 in C++ under both GCC and Clang, and the 69
+- 134 tests under `ctest`: 133 in C++ under both GCC and Clang, and the 73
   Python tests registered as one more — with `-Werror`, zero warnings, and
   clean under ASan + UBSan
 

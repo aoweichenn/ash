@@ -101,6 +101,15 @@ public:
         CancelToken local_token;
         CancelToken& token = cancel != nullptr ? *cancel : local_token;
 
+        // Ctrl-C, for the length of the run. Built here, with the GIL held and
+        // before the run lets go of it, because taking the signal means asking
+        // Python two questions -- which thread this is, and what handler is
+        // installed -- and both are answered with the GIL in hand.
+        //
+        // It cancels the same token as everything else, so a Ctrl-C and a timer
+        // and a failing callback all arrive at the run the same way.
+        InterruptWatch interrupt{token};
+
         // Installed only when asked for. The sink takes the GIL once per event
         // from inside libcurl's write callback, so a caller that wants the
         // answer and not the play-by-play should not pay for it -- and, more to
@@ -128,6 +137,23 @@ public:
             // is the first moment since the run began that the GIL is safely
             // back in hand.
             sink->rethrow_if_failed();
+        }
+        if (interrupt.interrupted() && outcome.stop_reason == "cancelled") {
+            // Ctrl-C arrived and is what ended the run, so it is reported the
+            // way Python reports it -- from here rather than from the handler,
+            // which could not raise, and not from inside the run, which never
+            // reached a bytecode boundary to raise at.
+            //
+            // Only when the run ended cancelled. A signal that arrived once the
+            // loop had already produced its answer would otherwise turn a
+            // completed run into an exception and throw away work that was done
+            // and paid for; a run that completed is one the model had already
+            // finished answering, so the Ctrl-C was a moment too late to mean
+            // anything. Asked of the result rather than assumed from the flag,
+            // because the two are set by different threads and the run can win
+            // that race -- which is the right way round for it to be lost.
+            PyErr_SetNone(PyExc_KeyboardInterrupt);
+            throw py::error_already_set();
         }
 
         Result result;
@@ -184,6 +210,12 @@ ends the run as cancelled instead of failing it.
 
 cancel= takes an ash.CancelToken and is the way to end a run from outside, from
 any thread; see CancelToken for why it is not a callback.
+
+Ctrl-C stops a run too, and arrives as KeyboardInterrupt. That is only true of a
+run made on the main thread of a program that has not installed its own SIGINT
+handler: a program that has one is using the signal for something, and a run
+made on a worker thread is not where the signal is delivered. In those two cases
+the signal is left alone and a run is stopped by cancel= or not at all.
 )")
         .def("__repr__", &Agent::describe);
 

@@ -1,5 +1,7 @@
 #include "stream.hpp"
 
+#include <chrono>
+#include <csignal>
 #include <exception>
 #include <string>
 #include <utility>
@@ -10,6 +12,42 @@
 namespace ash::python {
 
 namespace {
+
+// Set by the signal handler and read by the watchdog thread. volatile
+// sig_atomic_t is the one type the standard blesses for a value shared with a
+// signal handler: the write cannot be torn, and the read cannot be hoisted out
+// of the loop that is waiting on it.
+volatile std::sig_atomic_t g_sigint_seen = 0;
+
+extern "C" void take_sigint(int) {
+    // The whole handler. request_stop() takes a lock and may run the callbacks
+    // registered on the stop state, and neither is async-signal-safe, so that
+    // part is left to the watchdog below.
+    g_sigint_seen = 1;
+}
+
+// How long the watchdog sleeps between looks at the flag.
+//
+// It polls rather than waits to be woken because the thing that sets the flag
+// is a signal handler, and a condition variable is not something a signal
+// handler may touch. Five milliseconds is two orders of magnitude below the
+// notice a stop gets anyway -- libcurl calls its progress callback about once a
+// second, and that is where a request in flight finds out -- so it costs
+// nothing in responsiveness, and it bounds how long the watch takes to shut
+// down to the same five.
+constexpr std::chrono::milliseconds kPollInterval{5};
+
+// Whether taking SIGINT away from CPython would be taking it away from someone.
+bool may_take_sigint() {
+    py::module_ threading = py::module_::import("threading");
+    if (!threading.attr("current_thread")().is(threading.attr("main_thread")())) {
+        return false;
+    }
+
+    py::module_ signal = py::module_::import("signal");
+    return signal.attr("getsignal")(signal.attr("SIGINT"))
+        .is(signal.attr("default_int_handler"));
+}
 
 // One event, as a dict. A dict rather than a class for the same reason the
 // transcript is one: what a caller does with an event is look at two or three
@@ -51,6 +89,60 @@ py::dict event_to_python(const StreamEvent& event) {
 }
 
 }  // namespace
+
+InterruptWatch::InterruptWatch(CancelToken& token) : token_(token) {
+    if (!may_take_sigint()) {
+        return;
+    }
+
+    previous_ = PyOS_getsig(SIGINT);
+    PyOS_setsig(SIGINT, take_sigint);
+    installed_ = true;
+
+    // Clear, not inherited: a signal that arrived before this watch went up is
+    // not this run's to act on, and the flag is a global that the run before
+    // this one may have left set.
+    g_sigint_seen = 0;
+
+    watchdog_ = std::jthread([this](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            if (g_sigint_seen != 0) {
+                token_.cancel();
+                return;
+            }
+            std::this_thread::sleep_for(kPollInterval);
+        }
+    });
+}
+
+InterruptWatch::~InterruptWatch() {
+    // Asked to stop first, so that the thread is on its way out before the
+    // handler goes back to being CPython's. The join is the jthread's own, one
+    // member later, and by then it cannot be anywhere but in the sleep.
+    watchdog_.request_stop();
+
+    if (installed_) {
+        // A signal that arrived in the last few milliseconds of a run may not
+        // have been turned into a cancel before the run ended, because the
+        // watchdog polls. Doing it here as well is what makes "a Ctrl-C during a
+        // run cancels that run's token" true of every Ctrl-C instead of of most
+        // of them; it is the same call the watchdog would have made, on a token
+        // whose run is over.
+        //
+        // Under installed_, because the flag is only cleared where it is taken
+        // up. A watch that declined to install never cleared it, and a signal
+        // held by an earlier run is not this one's to cancel.
+        if (g_sigint_seen != 0) {
+            token_.cancel();
+        }
+
+        PyOS_setsig(SIGINT, previous_);
+    }
+}
+
+bool InterruptWatch::interrupted() const noexcept {
+    return installed_ && g_sigint_seen != 0;
+}
 
 PythonSink::PythonSink(py::object on_text, py::object on_event, CancelToken& token)
     : on_text_(std::move(on_text)), on_event_(std::move(on_event)), token_(token) {
