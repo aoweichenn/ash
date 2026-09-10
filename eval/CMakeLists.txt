@@ -1,4 +1,5 @@
 add_library(ash_eval
+    report.cpp
     runner.cpp
     suite.cpp)
 

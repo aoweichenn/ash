@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -16,6 +17,7 @@
 
 #include "ash/record/journal.hpp"
 #include "ash_eval.hpp"
+#include "report.hpp"
 
 namespace {
 
@@ -85,6 +87,34 @@ void rewrite_header_model(const fs::path& source, const fs::path& destination, c
         }
         output << parsed.dump() << '\n';
     }
+}
+
+ash::eval::JobResult make_job(std::string id, bool passed, int steps = 1, int tokens = 10) {
+    ash::eval::JobResult result;
+    result.id = std::move(id);
+    result.passed = passed;
+    result.stop_reason = "completed";
+    result.steps = steps;
+    result.prompt_tokens = tokens;
+    result.completion_tokens = 0;
+    if (!passed) {
+        result.failures.push_back("expected something else");
+    }
+    return result;
+}
+
+ash::eval::SuiteReport report_of(std::vector<ash::eval::JobResult> jobs) {
+    ash::eval::SuiteReport report;
+    report.suite = "scripted";
+    report.jobs = std::move(jobs);
+    return report;
+}
+
+ash::eval::JobDelta delta_for(const ash::eval::ReportDiff& diff, const std::string& id) {
+    const auto found = std::find_if(diff.jobs.begin(), diff.jobs.end(),
+                                    [&](const ash::eval::JobDelta& delta) { return delta.id == id; });
+    REQUIRE(found != diff.jobs.end());
+    return *found;
 }
 
 // A step is a model turn that asked for tools. The turn that closes the loop
@@ -254,5 +284,122 @@ TEST_CASE("a malformed suite is rejected with the offending field named") {
     SECTION("a missing file") {
         CHECK_THROWS_WITH(ash::eval::load_suite(dir.path() / "absent.json"),
                           Catch::Matchers::ContainsSubstring("cannot open suite"));
+    }
+}
+
+TEST_CASE("a report round-trips through the file it is written to") {
+    const TempDir dir{"ash_eval_report"};
+    const fs::path path = dir.path() / "report.json";
+
+    const ash::eval::SuiteReport original = ash::eval::run_suite(ash::eval::load_suite(core_suite()));
+    ash::eval::write_report(original, path);
+
+    // A cost has to be a JSON number. nlohmann routes a braced scalar through
+    // its initializer_list constructor, so `json{0.001}` is the array [0.001],
+    // which comes back as a different report rather than as an error.
+    const nlohmann::json raw = nlohmann::json::parse(read_text(path));
+    REQUIRE(raw.at("jobs").size() == 2);
+    CHECK(raw.at("jobs").at(0).at("cost_usd").is_number());
+
+    const ash::eval::SuiteReport loaded = ash::eval::read_report(path);
+    CHECK(loaded.suite == original.suite);
+    REQUIRE(loaded.jobs.size() == original.jobs.size());
+    for (std::size_t i = 0; i < loaded.jobs.size(); ++i) {
+        CHECK(loaded.jobs[i].id == original.jobs[i].id);
+        CHECK(loaded.jobs[i].passed == original.jobs[i].passed);
+        CHECK(loaded.jobs[i].stop_reason == original.jobs[i].stop_reason);
+        CHECK(loaded.jobs[i].steps == original.jobs[i].steps);
+        CHECK(loaded.jobs[i].prompt_tokens == original.jobs[i].prompt_tokens);
+        CHECK(loaded.jobs[i].completion_tokens == original.jobs[i].completion_tokens);
+        CHECK(loaded.jobs[i].cost_usd == original.jobs[i].cost_usd);
+        CHECK(loaded.jobs[i].model_latency_us == original.jobs[i].model_latency_us);
+    }
+    CHECK(loaded.model_call_latencies_us == original.model_call_latencies_us);
+    CHECK(loaded.total_cost_usd() == original.total_cost_usd());
+    CHECK(loaded.latency_percentile_us(95) == original.latency_percentile_us(95));
+}
+
+TEST_CASE("a job with no known price round-trips as an explicit null") {
+    const TempDir dir{"ash_eval_report_null"};
+    const fs::path path = dir.path() / "report.json";
+
+    ash::eval::SuiteReport report = report_of({make_job("unpriced", true)});
+    // make_job leaves cost_usd empty, which is the case being tested.
+    ash::eval::write_report(report, path);
+
+    const nlohmann::json raw = nlohmann::json::parse(read_text(path));
+    CHECK(raw.at("jobs").at(0).at("cost_usd").is_null());
+
+    const ash::eval::SuiteReport loaded = ash::eval::read_report(path);
+    REQUIRE(loaded.jobs.size() == 1);
+    CHECK_FALSE(loaded.jobs.front().cost_usd.has_value());
+    CHECK_FALSE(loaded.every_cost_known());
+}
+
+TEST_CASE("a report from an unknown format version is refused") {
+    const TempDir dir{"ash_eval_report_version"};
+    const fs::path path = dir.path() / "future.json";
+    write_text(path, R"({"version": 99, "suite": "x", "jobs": []})");
+
+    CHECK_THROWS_WITH(ash::eval::read_report(path), Catch::Matchers::ContainsSubstring("version 99"));
+}
+
+TEST_CASE("the baseline diff names what moved and what broke") {
+    SECTION("identical reports are unchanged, and that is not a regression") {
+        const ash::eval::SuiteReport report = report_of({make_job("a", true), make_job("b", true)});
+        const ash::eval::ReportDiff diff = ash::eval::diff_reports(report, report);
+
+        CHECK(delta_for(diff, "a").kind == ash::eval::ChangeKind::kUnchanged);
+        CHECK_FALSE(diff.regressed());
+        CHECK(diff.notes.empty());
+    }
+
+    SECTION("a job that passed and now fails is a regression") {
+        const ash::eval::ReportDiff diff = ash::eval::diff_reports(report_of({make_job("a", true)}),
+                                                                   report_of({make_job("a", false)}));
+
+        const ash::eval::JobDelta delta = delta_for(diff, "a");
+        CHECK(delta.kind == ash::eval::ChangeKind::kRegressed);
+        CHECK(diff.regressed());
+        CHECK(join_failures(delta.notes).find("was passing, now fails") != std::string::npos);
+    }
+
+    SECTION("a job that failed and now passes is an improvement") {
+        const ash::eval::ReportDiff diff = ash::eval::diff_reports(report_of({make_job("a", false)}),
+                                                                   report_of({make_job("a", true)}));
+
+        CHECK(delta_for(diff, "a").kind == ash::eval::ChangeKind::kImproved);
+        CHECK_FALSE(diff.regressed());
+    }
+
+    SECTION("a job that still passes but costs more is changed, not a regression") {
+        const ash::eval::ReportDiff diff = ash::eval::diff_reports(
+            report_of({make_job("a", true, 2, 100)}), report_of({make_job("a", true, 5, 250)}));
+
+        const ash::eval::JobDelta delta = delta_for(diff, "a");
+        CHECK(delta.kind == ash::eval::ChangeKind::kChanged);
+        CHECK_FALSE(diff.regressed());
+        const std::string notes = join_failures(delta.notes);
+        CHECK(notes.find("steps 2 -> 5") != std::string::npos);
+        CHECK(notes.find("tokens 100 -> 250") != std::string::npos);
+    }
+
+    SECTION("a new job is reported and is not a regression") {
+        const ash::eval::ReportDiff diff = ash::eval::diff_reports(
+            report_of({make_job("a", true)}), report_of({make_job("a", true), make_job("b", true)}));
+
+        CHECK(delta_for(diff, "b").kind == ash::eval::ChangeKind::kAdded);
+        CHECK_FALSE(diff.regressed());
+        CHECK(join_failures(diff.notes).find("passing 1/1 -> 2/2") != std::string::npos);
+    }
+
+    SECTION("deleting a failing job is still a regression") {
+        // Removing the job that fails would otherwise make the suite look
+        // better, which is the hole a baseline exists to close.
+        const ash::eval::ReportDiff diff = ash::eval::diff_reports(
+            report_of({make_job("a", true), make_job("b", false)}), report_of({make_job("a", true)}));
+
+        CHECK(delta_for(diff, "b").kind == ash::eval::ChangeKind::kRemoved);
+        CHECK(diff.regressed());
     }
 }

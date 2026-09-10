@@ -76,6 +76,33 @@ regression tests that cost nothing to run:
 ./build/fedora-clang/apps/cli/ash replay examples/journals/openai.jsonl
 ```
 
+Because the journals are the input, a whole suite of them can be graded offline
+— no key, no network, no budget — which is what makes it safe to run on every
+push:
+
+```bash
+./build/fedora-clang/apps/cli/ash eval --suite examples/suites/core.json
+```
+
+```
+  job                           result   steps  tokens        cost   latency
+  summary-openai-compatible     pass         2    2283   $0.001006    3.739s
+  summary-anthropic             pass         3    1168   $0.000653    4.023s
+
+  suite core: 2/2 passed
+  tokens  3451 (prompt 2758, completion 693)
+  cost    $0.001659
+  latency p50 0.915s  p95 1.487s  (7 recorded model calls)
+```
+
+`--json` writes that report to a file, and `--baseline` reads an earlier one
+back and reports what moved, exiting non-zero on a regression:
+
+```bash
+ash eval --suite examples/suites/core.json --json baseline.json
+ash eval --suite examples/suites/core.json --baseline baseline.json
+```
+
 The suite also runs under AddressSanitizer and UndefinedBehaviorSanitizer, with
 leak detection on — the journal and the `stop_source` plumbing hand ownership
 around enough that a leak is a real failure mode, not a hypothetical one:
@@ -115,9 +142,12 @@ for a known key. This is a property of the design, not a redaction step that
 could be forgotten.
 
 **The core stays embeddable.** `include/ash` may not contain `pybind11`, CLI
-code, or anything that prints to the console — it returns data and lets a
-consumer decide what to do with it. A test enforces the boundary, and the test
-is checked against a deliberate violation so it cannot pass vacuously.
+code, eval types, or anything that prints to the console — it returns data and
+lets a consumer decide what to do with it. The eval harness therefore lives in
+a top-level `eval/` and consumes the runtime like any other program, rather
+than forcing every embedder to compile a suite parser and a price table. A test
+enforces the boundary, and the test is checked against a deliberate violation
+so it cannot pass vacuously.
 
 ## Status
 
@@ -133,16 +163,17 @@ Done:
 - An append-only journal, recording and replaying decorators, and `ash replay`
 - Two real recordings committed under `examples/journals/`, replayed by the suite
 - An eval harness over JSON suites: per-job checks, pass/fail, token and cost
-  totals, and latency percentiles. It replays committed journals, so it runs
-  offline and costs nothing
+  totals, and latency percentiles, behind `ash eval`. It replays committed
+  journals, so it runs offline and costs nothing
+- Report files and `--baseline`, which diffs a run against an earlier one and
+  exits non-zero on a regression — including a job that was quietly deleted
 - A price table, and per-call timings written into the journal, so a replayed
   run still reports the cost and latency the original run really had
-- 57 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
+- 61 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
   ASan + UBSan
 
 Next:
 
-- `ash eval` on the command line, with baseline comparison and regression flags
 - SSE streaming with a bounded channel and backpressure
 - Python bindings via pybind11
 - Structured traces, a viewer, and per-provider cost accounting

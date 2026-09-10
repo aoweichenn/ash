@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -16,10 +17,12 @@
 #include "ash/record/decorators.hpp"
 #include "ash/record/journal.hpp"
 #include "ash/record/replay.hpp"
+#include "ash/record/replay_run.hpp"
 #include "ash/runtime.hpp"
 #include "ash/tool/builtin.hpp"
 #include "ash/tool/tool.hpp"
 #include "ash/version.hpp"
+#include "report.hpp"
 
 namespace {
 
@@ -50,8 +53,14 @@ void print_usage() {
 usage:
   ash run [options] <task>       run an agent, optionally recording a journal
   ash replay <journal>           re-run a recorded run offline, with no API key
+  ash eval [options]             grade a suite of recorded runs, offline
   ash version                    print the version
   ash help                       print this message
+
+options for `eval`:
+  --suite <path>         the suite to run (required)
+  --baseline <path>      a report from an earlier run; regressions set exit 1
+  --json <path>          write this run's report, for use as a later baseline
 
 options for `run`:
   --task <text>          the task to run (may also be a positional argument)
@@ -68,6 +77,7 @@ examples:
   export ASH_API_KEY=sk-...
   ash run --journal demo.jsonl "list the files here, then summarize this project"
   ash replay demo.jsonl          # same output, no key, no network, no cost
+  ash eval --suite examples/suites/core.json --json /tmp/report.json
 )";
 }
 
@@ -299,33 +309,171 @@ int replay_command(const std::vector<std::string>& args) {
     ash::Journal journal = ash::Journal::load(path);
     const std::string actor{kActor};
 
-    ash::ReplayCursor cursor{journal, actor};
-    ash::ReplayingProvider provider{cursor, journal.header().provider, journal.header().model};
-    ash::ToolRegistry tools = ash::make_replaying_registry(journal, cursor, actor);
-
-    // Rebuilt from the header so the requests match the recording exactly.
-    ash::AgentOptions agent_options;
-    if (!journal.header().system_prompt.empty()) {
-        agent_options.system_prompt = journal.header().system_prompt;
+    std::size_t available = 0;
+    for (const ash::Event& event : journal.events()) {
+        if (event.actor == actor) {
+            ++available;
+        }
     }
-    agent_options.max_steps = journal.header().max_steps > 0 ? journal.header().max_steps : kDefaultMaxSteps;
 
-    std::cout << "ash: replaying " << path.string() << " (" << provider.name() << " / " << provider.model()
-              << ")\n";
-    std::cout << "ash: recorded " << journal.header().created_at << ", " << cursor.available()
+    std::cout << "ash: replaying " << path.string() << " (" << journal.header().provider << " / "
+              << journal.header().model << ")\n";
+    std::cout << "ash: recorded " << journal.header().created_at << ", " << available
               << " events for actor '" << actor << "'\n";
     std::cout << "ash: task: " << journal.header().task << "\n\n";
 
-    const ash::AgentResult result =
-        ash::run_agent(provider, tools, journal.header().task, agent_options).sync_wait();
-    print_result(result);
+    // The same wiring the eval harness uses, so a replay means one thing.
+    // A run that takes a different path than the recording throws here, which
+    // is exactly the drift this tool exists to catch.
+    const ash::ReplayOutcome outcome = ash::replay_run(journal, actor);
+    print_result(outcome.result);
+    std::cout << "ash: replay verified, " << outcome.events_consumed << " events consumed\n";
 
-    // A replay that did not consume the whole journal took a different path than
-    // the recording, which is exactly the drift this tool exists to catch.
-    cursor.verify_consumed();
-    std::cout << "ash: replay verified, " << cursor.consumed() << " events consumed\n";
+    return outcome.result.stop_reason == "completed" ? 0 : 1;
+}
 
-    return result.stop_reason == "completed" ? 0 : 1;
+struct EvalOptions {
+    std::string suite_path;
+    std::string baseline_path;
+    std::string json_path;
+};
+
+void print_eval_usage() {
+    std::cout << R"(usage: ash eval --suite <path> [--json <path>] [--baseline <path>]
+
+  --suite <path>         the suite to run (required)
+  --baseline <path>      a report from an earlier run; regressions set exit 1
+  --json <path>          write this run's report, for use as a later baseline
+
+Every job replays a journal, so this needs no API key, no network, and no
+budget. Exit status is 0 only when every job passed and nothing regressed.
+)";
+}
+
+void print_report_table(const ash::eval::SuiteReport& report) {
+    std::cout << "  " << std::left << std::setw(30) << "job" << std::setw(7) << "result" << std::right
+              << std::setw(7) << "steps" << std::setw(8) << "tokens" << std::setw(12) << "cost" << std::setw(10)
+              << "latency"
+              << "\n";
+
+    for (const ash::eval::JobResult& job : report.jobs) {
+        std::cout << "  " << std::left << std::setw(30) << job.id << std::setw(7)
+                  << (job.passed ? "pass" : "FAIL") << std::right << std::setw(7) << job.steps << std::setw(8)
+                  << (job.prompt_tokens + job.completion_tokens) << std::setw(12)
+                  << ash::eval::format_cost(job.cost_usd) << std::setw(10)
+                  << ash::eval::format_us(job.model_latency_us) << "\n";
+        for (const std::string& failure : job.failures) {
+            std::cout << "      " << failure << "\n";
+        }
+    }
+
+    std::cout << "\n  suite " << report.suite << ": " << report.passed() << "/" << report.jobs.size()
+              << " passed\n";
+    std::cout << "  tokens  " << (report.total_prompt_tokens() + report.total_completion_tokens())
+              << " (prompt " << report.total_prompt_tokens() << ", completion " << report.total_completion_tokens()
+              << ")\n";
+
+    std::cout << "  cost    " << ash::eval::format_cost(report.total_cost_usd());
+    if (!report.every_cost_known()) {
+        std::cout << " (some jobs use a model with no published price)";
+    }
+    std::cout << "\n";
+
+    // The latencies come from the recordings, not from this replay, so the
+    // number is the one the original run really saw.
+    std::cout << "  latency p50 " << ash::eval::format_us(report.latency_percentile_us(50)) << "  p95 "
+              << ash::eval::format_us(report.latency_percentile_us(95)) << "  ("
+              << report.model_call_latencies_us.size() << " recorded model calls)\n";
+}
+
+void print_diff(const ash::eval::ReportDiff& diff) {
+    int unchanged = 0;
+    for (const ash::eval::JobDelta& delta : diff.jobs) {
+        if (delta.kind == ash::eval::ChangeKind::kUnchanged) {
+            ++unchanged;
+            continue;
+        }
+        std::cout << "  " << std::left << std::setw(30) << delta.id << " " << ash::eval::to_string(delta.kind)
+                  << "\n";
+        for (const std::string& note : delta.notes) {
+            std::cout << "      " << note << "\n";
+        }
+    }
+    for (const std::string& note : diff.notes) {
+        std::cout << "  " << note << "\n";
+    }
+
+    if (unchanged > 0) {
+        std::cout << "  " << unchanged << " job(s) unchanged\n";
+    }
+    std::cout << (diff.regressed() ? "  regressions found\n" : "  no regressions\n");
+}
+
+int eval_command(const std::vector<std::string>& args) {
+    EvalOptions options;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string& arg = args[i];
+
+        auto take_value = [&](std::string& slot) {
+            if (i + 1 >= args.size()) {
+                std::cerr << "ash: " << arg << " requires a value\n";
+                return false;
+            }
+            slot = args[++i];
+            return true;
+        };
+
+        if (arg == "-h" || arg == "--help") {
+            print_eval_usage();
+            return 0;
+        }
+        if (arg == "--suite") {
+            if (!take_value(options.suite_path)) return 2;
+        } else if (arg == "--baseline") {
+            if (!take_value(options.baseline_path)) return 2;
+        } else if (arg == "--json") {
+            if (!take_value(options.json_path)) return 2;
+        } else {
+            std::cerr << "ash: unknown option '" << arg << "'\n";
+            return 2;
+        }
+    }
+
+    if (options.suite_path.empty()) {
+        std::cerr << "ash: --suite is required\n\n";
+        print_eval_usage();
+        return 2;
+    }
+
+    const ash::eval::Suite suite = ash::eval::load_suite(options.suite_path);
+    const ash::eval::SuiteReport report = ash::eval::run_suite(suite);
+    print_report_table(report);
+
+    if (!options.json_path.empty()) {
+        ash::eval::write_report(report, options.json_path);
+        std::cout << "\nash: wrote " << options.json_path << "\n";
+    }
+
+    int status = report.failed() == 0 ? 0 : 1;
+
+    if (!options.baseline_path.empty()) {
+        const ash::eval::SuiteReport baseline = ash::eval::read_report(options.baseline_path);
+        std::cout << "\n  baseline " << options.baseline_path;
+        if (baseline.suite != report.suite) {
+            // Comparing two different suites would produce noise dressed up as
+            // findings, so say so and let the numbers stand on their own.
+            std::cout << " (suite '" << baseline.suite << "', not '" << report.suite << "')";
+        }
+        std::cout << "\n";
+
+        const ash::eval::ReportDiff diff = ash::eval::diff_reports(baseline, report);
+        print_diff(diff);
+        if (diff.regressed()) {
+            status = 1;
+        }
+    }
+
+    return status;
 }
 
 int dispatch(const std::vector<std::string>& args) {
@@ -336,6 +484,9 @@ int dispatch(const std::vector<std::string>& args) {
     if (command == "replay") {
         return replay_command(args);
     }
+    if (command == "eval") {
+        return eval_command(args);
+    }
     if (command == "version" || command == "--version") {
         std::cout << "ash " << ash::version() << "\n";
         return 0;
@@ -344,7 +495,7 @@ int dispatch(const std::vector<std::string>& args) {
         print_usage();
         return 0;
     }
-    if (command == "eval" || command == "trace") {
+    if (command == "trace") {
         std::cerr << "ash: '" << command << "' is not implemented yet\n";
         return 2;
     }
