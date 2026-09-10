@@ -7,13 +7,18 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <variant>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "ash/model/providers.hpp"
+#include "ash/model/stream.hpp"
 #include "ash/record/decorators.hpp"
 #include "ash/record/journal.hpp"
 #include "ash/record/replay.hpp"
@@ -45,6 +50,7 @@ struct RunOptions {
     std::string journal_path;
     int max_steps = kDefaultMaxSteps;
     int max_tokens = 0;  // 0 means "let the provider decide"
+    bool stream = false;
 };
 
 void print_usage() {
@@ -73,6 +79,7 @@ options for `run`:
   --system <prompt>      override the system prompt
   --max-steps <n>        model turns before giving up, default 16
   --max-tokens <n>       response token cap, default provider-chosen
+  --stream               print the answer as the model writes it
 
 examples:
   export ASH_API_KEY=sk-...
@@ -147,6 +154,8 @@ ParseResult parse_run_options(const std::vector<std::string>& args, RunOptions& 
             if (!take_int(options.max_steps)) return ParseResult::kError;
         } else if (arg == "--max-tokens") {
             if (!take_int(options.max_tokens)) return ParseResult::kError;
+        } else if (arg == "--stream") {
+            options.stream = true;
         } else if (!arg.empty() && arg.front() == '-' && arg != "-") {
             std::cerr << "ash: unknown option '" << arg << "'\n";
             return ParseResult::kError;
@@ -190,21 +199,91 @@ ParseResult parse_run_options(const std::vector<std::string>& args, RunOptions& 
     return {};
 }
 
-// Shared by `run` and `replay`, which is the point: a replayed run produces the
-// same output because it goes through the same printing.
-void print_result(const ash::AgentResult& result) {
-    for (const auto& step : result.steps) {
-        for (const auto& call : step.assistant.tool_calls) {
-            std::cout << "  -> " << call.name << " " << summarize(call.arguments.dump(), 64) << "\n";
+// Writes the model's answer out as it is written.
+//
+// Unbuffered and without holding anything back to format later: a stream that
+// waited for a whole line would look exactly like no stream at all for an
+// answer that is one long line, which is most of them.
+class ConsoleSink final : public ash::StreamSink {
+public:
+    void on_event(const ash::StreamEvent& event) override {
+        if (const auto* delta = std::get_if<ash::TextDelta>(&event)) {
+            std::cout << delta->text << std::flush;
+            line_open_ = true;
+            return;
         }
-        for (const auto& tool_result : step.tool_results) {
-            std::cout << "  <- " << summarize(tool_result.content) << "\n";
+        // A step that said nothing -- a tool call -- must not leave a blank
+        // line behind it, so the break is only written when there is a line to
+        // break. Each streamed answer ends up on its own line.
+        if (std::holds_alternative<ash::StreamDone>(event) && line_open_) {
+            std::cout << "\n" << std::flush;
+            line_open_ = false;
         }
     }
 
-    const std::string answer = last_assistant_text(result);
-    if (!answer.empty()) {
-        std::cout << "\n" << answer << "\n";
+private:
+    bool line_open_ = false;
+};
+
+// Prints tool activity the moment it happens.
+//
+// The loop reports its tool steps only once the run is over, so without this a
+// streamed run would print the answer before the tool calls that produced it --
+// the transcript would arrive after the thing it explains. This is the same
+// seam the recorder uses, which is the point: presentation is a decorator here
+// too, and the loop is not asked to know about it.
+class PrintingTool final : public ash::Tool {
+public:
+    explicit PrintingTool(std::shared_ptr<ash::Tool> inner) : inner_(std::move(inner)) {}
+
+    [[nodiscard]] std::string_view name() const noexcept override { return inner_->name(); }
+
+    [[nodiscard]] std::string_view description() const noexcept override { return inner_->description(); }
+
+    [[nodiscard]] const nlohmann::json& input_schema() const noexcept override {
+        return inner_->input_schema();
+    }
+
+    ash::Task<ash::ToolResult> invoke(const nlohmann::json& arguments, std::stop_token stop) const override {
+        std::cout << "  -> " << name() << " " << summarize(arguments.dump(), 64) << "\n" << std::flush;
+        ash::ToolResult result = co_await inner_->invoke(arguments, stop);
+        std::cout << "  <- " << summarize(result.content) << "\n" << std::flush;
+        co_return result;
+    }
+
+private:
+    std::shared_ptr<ash::Tool> inner_;
+};
+
+[[nodiscard]] ash::ToolRegistry make_printing_registry(const ash::ToolRegistry& tools) {
+    ash::ToolRegistry printing;
+    for (const auto& tool : tools.tools()) {
+        printing.add(std::make_shared<PrintingTool>(tool));
+    }
+    return printing;
+}
+
+// Shared by `run` and `replay`, which is the point: a replayed run produces the
+// same output because it goes through the same printing.
+//
+// `shown_live` means the run already printed its transcript as it happened, so
+// printing it again here would say everything twice. The summary line is always
+// printed: it is only known once the run is over.
+void print_result(const ash::AgentResult& result, bool shown_live = false) {
+    if (!shown_live) {
+        for (const auto& step : result.steps) {
+            for (const auto& call : step.assistant.tool_calls) {
+                std::cout << "  -> " << call.name << " " << summarize(call.arguments.dump(), 64) << "\n";
+            }
+            for (const auto& tool_result : step.tool_results) {
+                std::cout << "  <- " << summarize(tool_result.content) << "\n";
+            }
+        }
+
+        const std::string answer = last_assistant_text(result);
+        if (!answer.empty()) {
+            std::cout << "\n" << answer << "\n";
+        }
     }
 
     std::cout << "\nash: stop=" << result.stop_reason << " steps=" << result.steps.size() << " tokens="
@@ -282,6 +361,14 @@ int run_command(const std::vector<std::string>& args) {
         tools = ash::make_recording_registry(tools, *journal, std::string{kActor});
     }
 
+    ConsoleSink sink;
+    if (options.stream) {
+        // Installed only when streaming, because it exists to keep the live
+        // output in order. Without --stream the transcript is printed in one
+        // piece at the end and this would print it twice.
+        tools = make_printing_registry(tools);
+    }
+
     std::cout << "ash: " << provider->name() << " / " << provider->model() << " -> " << options.base_url
               << "\n";
     if (journal.has_value()) {
@@ -289,9 +376,10 @@ int run_command(const std::vector<std::string>& args) {
     }
     std::cout << "ash: task: " << options.task << "\n\n";
 
-    const ash::AgentResult result =
-        ash::run_agent(*provider, tools, options.task, agent_options).sync_wait();
-    print_result(result);
+    const ash::AgentResult result = ash::run_agent(*provider, tools, options.task, agent_options,
+                                                   std::stop_token{}, options.stream ? &sink : nullptr)
+                                        .sync_wait();
+    print_result(result, options.stream);
 
     return result.stop_reason == "completed" ? 0 : 1;
 }

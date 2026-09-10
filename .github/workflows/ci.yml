@@ -93,6 +93,12 @@ jobs:
           REPLAYS: 100
         run: ./tools/verify_replay.sh build/fedora-clang/apps/cli/ash
 
+      # The other half of the claim: a streamed run is the same run as a plain
+      # one. Both are recorded against the stub and the journals are diffed, so
+      # a change that quietly made streaming a second kind of call fails here.
+      - name: Verify streaming equivalence
+        run: ./tools/verify_streaming.sh build/fedora-clang/apps/cli/ash
+
   eval-offline:
     name: eval (offline, no key)
     runs-on: ubuntu-24.04
