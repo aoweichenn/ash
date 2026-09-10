@@ -23,11 +23,21 @@
       "displayName": "Fedora / Clang",
       "inherits": "base",
       "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++" }
+    },
+    {
+      "name": "fedora-clang-asan",
+      "displayName": "Fedora / Clang + ASan + UBSan",
+      "inherits": "fedora-clang",
+      "cacheVariables": {
+        "ASH_SANITIZE": "ON",
+        "ASH_WERROR": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "fedora-gcc", "configurePreset": "fedora-gcc" },
-    { "name": "fedora-clang", "configurePreset": "fedora-clang" }
+    { "name": "fedora-clang", "configurePreset": "fedora-clang" },
+    { "name": "fedora-clang-asan", "configurePreset": "fedora-clang-asan" }
   ],
   "testPresets": [
     {
@@ -38,6 +48,11 @@
     {
       "name": "fedora-clang",
       "configurePreset": "fedora-clang",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "fedora-clang-asan",
+      "configurePreset": "fedora-clang-asan",
       "output": { "outputOnFailure": true }
     }
   ]

@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }}
+    runs-on: ubuntu-24.04
+    # The container matches the machine this is developed on, so CI exercises
+    # the same compiler versions rather than an approximation of them.
+    container: fedora:43
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            preset: fedora-gcc
+          - compiler: clang
+            preset: fedora-clang
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          gcc-c++ clang cmake ninja-build libcurl-devel openssl-devel git
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DASH_WERROR=ON
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }} --output-on-failure
+
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-24.04
+    container: fedora:43
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          clang cmake ninja-build libcurl-devel openssl-devel git
+
+      - name: Configure
+        run: cmake --preset fedora-clang-asan
+
+      - name: Build
+        run: cmake --build --preset fedora-clang-asan
+
+      # Leak detection stays on: a runtime that hands out stop_sources and
+      # journals is exactly where a forgotten ownership edge shows up.
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ctest --preset fedora-clang-asan --output-on-failure
+
+  replay-determinism:
+    name: replay determinism (offline)
+    runs-on: ubuntu-24.04
+    container: fedora:43
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          gcc-c++ cmake ninja-build libcurl-devel openssl-devel git python3
+
+      - name: Configure
+        run: cmake --preset fedora-clang
+
+      - name: Build
+        run: cmake --build --preset fedora-clang
+
+      # The headline claim, checked on every push: a recorded run replays
+      # byte-identically a hundred times, with the model server shut down and no
+      # API key anywhere in the environment.
+      - name: Verify replay determinism
+        env:
+          REPLAYS: 100
+        run: ./tools/verify_replay.sh build/fedora-clang/apps/cli/ash

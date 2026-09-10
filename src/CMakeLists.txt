@@ -31,3 +31,4 @@ target_link_libraries(ash_core
         spdlog::spdlog)
 
 ash_set_warnings(ash_core)
+ash_set_sanitizers(ash_core)

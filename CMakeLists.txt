@@ -17,6 +17,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(deps)
 include(warnings)
+include(sanitizers)
 
 option(ASH_BUILD_TESTS "Build ash tests" ON)
 option(ASH_BUILD_BENCHMARKS "Build ash benchmarks" OFF)
