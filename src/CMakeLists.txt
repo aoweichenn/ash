@@ -1,6 +1,13 @@
 add_library(ash_core
     version.cpp
-    io/thread_pool.cpp)
+    core/agent_loop.cpp
+    io/http_client.cpp
+    io/thread_pool.cpp
+    model/anthropic.cpp
+    model/openai_compat.cpp
+    model/provider.cpp
+    tool/builtin.cpp
+    tool/registry.cpp)
 
 target_include_directories(ash_core
     PUBLIC
