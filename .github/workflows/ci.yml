@@ -50,7 +50,7 @@ jobs:
       - name: Install dependencies
         run: >
           dnf install -y --setopt=install_weak_deps=False
-          clang cmake ninja-build libcurl-devel openssl-devel git
+          clang compiler-rt cmake ninja-build libcurl-devel openssl-devel git
 
       - name: Configure
         run: cmake --preset fedora-clang-asan
@@ -77,7 +77,7 @@ jobs:
       - name: Install dependencies
         run: >
           dnf install -y --setopt=install_weak_deps=False
-          gcc-c++ cmake ninja-build libcurl-devel openssl-devel git python3
+          clang cmake ninja-build libcurl-devel openssl-devel git python3
 
       - name: Configure
         run: cmake --preset fedora-clang
@@ -147,7 +147,7 @@ jobs:
       - name: Install dependencies
         run: >
           dnf install -y --setopt=install_weak_deps=False
-          gcc-c++ cmake ninja-build libcurl-devel openssl-devel git
+          clang cmake ninja-build libcurl-devel openssl-devel git
 
       - name: Configure
         run: cmake --preset fedora-clang
