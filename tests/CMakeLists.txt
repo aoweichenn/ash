@@ -1,4 +1,6 @@
 add_executable(ash_tests
+    task_test.cpp
+    thread_pool_test.cpp
     version_test.cpp)
 
 target_link_libraries(ash_tests

@@ -21,5 +21,6 @@ FetchContent_Declare(Catch2
 
 FetchContent_MakeAvailable(nlohmann_json spdlog Catch2)
 
+find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED)

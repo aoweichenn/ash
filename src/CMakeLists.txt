@@ -1,5 +1,6 @@
 add_library(ash_core
-    version.cpp)
+    version.cpp
+    io/thread_pool.cpp)
 
 target_include_directories(ash_core
     PUBLIC
@@ -12,6 +13,7 @@ target_compile_definitions(ash_core
 target_link_libraries(ash_core
     PUBLIC
         nlohmann_json::nlohmann_json
+        Threads::Threads
         CURL::libcurl
         OpenSSL::SSL
         OpenSSL::Crypto
