@@ -91,12 +91,14 @@ nlohmann::json encode_event(const Event& event) {
         line["kind"] = "model_call";
         line["request"] = model_call->request;
         line["response"] = model_call->response;
+        line["duration_us"] = model_call->duration_us;
     } else if (const auto* tool_call = std::get_if<ToolCallRecord>(&event.payload)) {
         line["kind"] = "tool_call";
         line["name"] = tool_call->name;
         line["arguments"] = tool_call->arguments;
         line["result"] = nlohmann::json{{"content", tool_call->result.content},
                                         {"is_error", tool_call->result.is_error}};
+        line["duration_us"] = tool_call->duration_us;
     }
     return line;
 }
@@ -111,6 +113,8 @@ Event decode_event(const nlohmann::json& line) {
         ModelCallRecord call;
         call.request = line.at("request").get<ChatRequest>();
         call.response = line.at("response").get<ChatResponse>();
+        // Absent in journals written before latency was recorded.
+        call.duration_us = line.value("duration_us", std::int64_t{0});
         event.payload = std::move(call);
     } else if (kind == "tool_call") {
         ToolCallRecord call;
@@ -118,6 +122,7 @@ Event decode_event(const nlohmann::json& line) {
         call.arguments = line.at("arguments");
         call.result.content = line.at("result").value("content", "");
         call.result.is_error = line.at("result").value("is_error", false);
+        call.duration_us = line.value("duration_us", std::int64_t{0});
         event.payload = std::move(call);
     } else {
         throw std::runtime_error{"unknown journal event kind '" + kind + "'"};

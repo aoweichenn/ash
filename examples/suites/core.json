@@ -1,0 +1,40 @@
+{
+  "name": "core",
+  "description": "The same task recorded against both wire dialects. Every job replays from a committed journal, so the suite needs no key, no network and no budget, and can run in CI on every push.",
+  "jobs": [
+    {
+      "id": "summary-openai-compatible",
+      "task": "List the files here, read calc.py, then write a one-line summary of what it does into SUMMARY.md.",
+      "journal": "../journals/openai.jsonl",
+      "check": {
+        "stop_reason": "completed",
+        "tools_called": ["list_dir", "read_file", "write_file"],
+        "tools_forbidden": ["run_shell"],
+        "final_contains": ["calc.py", "SUMMARY.md"],
+        "wrote_file": {
+          "path": "SUMMARY.md",
+          "content_contains": "add(a, b)"
+        },
+        "max_steps": 8,
+        "max_cost_usd": 0.01
+      }
+    },
+    {
+      "id": "summary-anthropic",
+      "task": "List the files here, read calc.py, then write a one-line summary of what it does into SUMMARY.md.",
+      "journal": "../journals/anthropic.jsonl",
+      "check": {
+        "stop_reason": "completed",
+        "tools_called": ["list_dir", "read_file", "write_file"],
+        "tools_forbidden": ["run_shell"],
+        "final_contains": ["calc.py", "SUMMARY.md"],
+        "wrote_file": {
+          "path": "SUMMARY.md",
+          "content_contains": "add(a, b)"
+        },
+        "max_steps": 8,
+        "max_cost_usd": 0.01
+      }
+    }
+  ]
+}

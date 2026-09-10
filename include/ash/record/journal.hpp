@@ -46,12 +46,18 @@ struct JournalHeader {
 struct ModelCallRecord {
     ChatRequest request;
     ChatResponse response;
+    // How long the call actually took, which is the one thing about a run that
+    // cannot be recovered by replaying it. Recording it keeps the latency in an
+    // eval report honest even when the eval itself is offline. Zero for
+    // journals written before this field existed.
+    std::int64_t duration_us = 0;
 };
 
 struct ToolCallRecord {
     std::string name;
     nlohmann::json arguments;
     ToolResult result;
+    std::int64_t duration_us = 0;
 };
 
 // The header is journal metadata, written once as its own line; every other

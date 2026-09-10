@@ -22,6 +22,7 @@ struct Banned {
 constexpr Banned kBanned[] = {
     {"pybind11", "the Python bindings must consume the core, not live inside it"},
     {"py::", "the Python bindings must consume the core, not live inside it"},
+    {"ash_eval.hpp", "the eval harness consumes the core; the core must not depend on it"},
     {"<iostream>", "the core returns data; deciding what to print belongs to the CLI"},
     {"std::cout", "the core returns data; deciding what to print belongs to the CLI"},
     {"std::cerr", "the core returns data; deciding what to print belongs to the CLI"},
@@ -56,4 +57,17 @@ TEST_CASE("the public headers stay free of consumer-layer dependencies") {
     // A boundary check that silently scanned nothing would always pass, so the
     // scan itself is asserted.
     CHECK(scanned >= 10);
+}
+
+TEST_CASE("the eval harness stays outside the public include tree") {
+    const fs::path include_root = fs::path{ASH_SOURCE_DIR} / "include" / "ash";
+
+    // The harness is a consumer of the runtime. Putting it under include/ash
+    // would make every embedder compile a suite parser and a price table it
+    // never calls.
+    CHECK_FALSE(fs::exists(include_root / "eval"));
+
+    // And the directory it does live in must actually hold something, so this
+    // test cannot pass by the harness having quietly disappeared.
+    CHECK(fs::exists(fs::path{ASH_SOURCE_DIR} / "eval" / "ash_eval.hpp"));
 }

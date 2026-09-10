@@ -132,13 +132,18 @@ Done:
 - Three filesystem tools and a coroutine agent loop with a step budget
 - An append-only journal, recording and replaying decorators, and `ash replay`
 - Two real recordings committed under `examples/journals/`, replayed by the suite
-- 50 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
+- An eval harness over JSON suites: per-job checks, pass/fail, token and cost
+  totals, and latency percentiles. It replays committed journals, so it runs
+  offline and costs nothing
+- A price table, and per-call timings written into the journal, so a replayed
+  run still reports the cost and latency the original run really had
+- 57 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
   ASan + UBSan
 
 Next:
 
+- `ash eval` on the command line, with baseline comparison and regression flags
 - SSE streaming with a bounded channel and backpressure
-- An eval harness: suites, pass rates, cost and latency percentiles, baselines
 - Python bindings via pybind11
 - Structured traces, a viewer, and per-provider cost accounting
 - Threading `stop_token` into libcurl's progress callback
@@ -148,6 +153,7 @@ Next:
 ```
 include/ash/     the public surface, and only that
 src/             core/ model/ tool/ record/ io/
+eval/            the eval harness -- a consumer of the runtime, never part of it
 apps/cli/        the ash command
 tests/           Catch2 suite
 tools/           the offline stub server and the replay determinism check

@@ -1,6 +1,7 @@
 add_executable(ash_tests
     agent_loop_test.cpp
     boundary_test.cpp
+    eval_test.cpp
     fixture_replay_test.cpp
     provider_test.cpp
     record_test.cpp
@@ -12,6 +13,7 @@ add_executable(ash_tests
 target_link_libraries(ash_tests
     PRIVATE
         ash_core
+        ash_eval
         Catch2::Catch2WithMain)
 
 # The boundary test reads the public headers from the source tree.

@@ -1,5 +1,6 @@
 add_library(ash_core
     version.cpp
+    cost.cpp
     core/agent_loop.cpp
     io/http_client.cpp
     io/thread_pool.cpp
@@ -9,6 +10,7 @@ add_library(ash_core
     record/decorators.cpp
     record/journal.cpp
     record/replay.cpp
+    record/replay_run.cpp
     tool/builtin.cpp
     tool/registry.cpp)
 

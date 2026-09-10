@@ -1,5 +1,7 @@
 #include "ash/record/decorators.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <stop_token>
 #include <string>
@@ -10,6 +12,18 @@
 #include <nlohmann/json.hpp>
 
 namespace ash {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+// Monotonic: latency is a duration, and a wall clock can step backwards under
+// NTP and produce a negative one.
+std::int64_t elapsed_us(Clock::time_point start) noexcept {
+    return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count();
+}
+
+}  // namespace
 
 RecordingProvider::RecordingProvider(std::unique_ptr<ModelProvider> inner, Journal& journal, std::string actor)
     : inner_(std::move(inner)), journal_(journal), actor_(std::move(actor)) {}
@@ -22,8 +36,15 @@ Task<ChatResponse> RecordingProvider::chat(ChatRequest request) {
     // Recorded only once the call succeeds, so a journal never holds a request
     // without its answer. The API key lives in the provider's config, which is
     // never part of a ChatRequest, so it cannot reach the journal.
+    const Clock::time_point start = Clock::now();
     ChatResponse response = co_await inner_->chat(request);
-    journal_.append(actor_, ModelCallRecord{request, response});
+
+    ModelCallRecord record;
+    record.request = std::move(request);
+    record.response = response;
+    record.duration_us = elapsed_us(start);
+    journal_.append(actor_, std::move(record));
+
     co_return std::move(response);
 }
 
@@ -48,8 +69,16 @@ std::string_view RecordingTool::description() const noexcept { return inner_->de
 const nlohmann::json& RecordingTool::input_schema() const noexcept { return inner_->input_schema(); }
 
 Task<ToolResult> RecordingTool::invoke(const nlohmann::json& arguments, std::stop_token stop) const {
+    const Clock::time_point start = Clock::now();
     ToolResult result = co_await inner_->invoke(arguments, stop);
-    journal_.append(actor_, ToolCallRecord{std::string{name()}, arguments, result});
+
+    ToolCallRecord record;
+    record.name = std::string{name()};
+    record.arguments = arguments;
+    record.result = result;
+    record.duration_us = elapsed_us(start);
+    journal_.append(actor_, std::move(record));
+
     co_return result;
 }
 

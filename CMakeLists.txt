@@ -26,6 +26,11 @@ option(ASH_WERROR "Treat compiler warnings as errors" OFF)
 
 add_subdirectory(src)
 
+# The eval harness is a consumer of ash_core, kept out of include/ash so that
+# embedding the runtime does not mean compiling a suite parser and a price
+# table. A test enforces the boundary.
+add_subdirectory(eval)
+
 if(ASH_BUILD_CLI)
     add_subdirectory(apps/cli)
 endif()
