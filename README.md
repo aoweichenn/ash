@@ -95,6 +95,17 @@ push:
   latency p50 0.915s  p95 1.487s  (7 recorded model calls)
 ```
 
+`--jobs` replays several jobs at once. It changes how long the suite takes and
+nothing else — the report is assembled in suite order and every number in it
+comes from a recording, so a parallel run and a serial one produce the same
+bytes:
+
+```bash
+ash eval --suite examples/suites/core.json --jobs 1 --json serial.json
+ash eval --suite examples/suites/core.json --jobs 8 --json parallel.json
+cmp serial.json parallel.json          # byte for byte, and against the baseline
+```
+
 `--json` writes that report to a file, and `--baseline` reads an earlier one
 back and reports what moved, exiting non-zero on a regression:
 
@@ -140,6 +151,17 @@ in which concurrent tasks happened to interleave is simply not part of the
 format, so it never has to be reproduced. Journals are already keyed this way,
 so concurrency needs no format change later.
 
+**A batch may be wider than the pool.** `when_all` starts each task on a worker
+and the task gives that worker back the moment it suspends, so a hundred calls
+over twenty threads make progress twenty at a time rather than deadlocking at
+twenty. The same reasoning runs through `LimitedProvider`: it caps how many
+requests are in flight against one endpoint, and its `AsyncSemaphore` parks the
+*coroutine* rather than the thread. A `std::counting_semaphore` acquired inside
+a coroutine holds the very thread that would have to release it, which deadlocks
+under exactly the load the limit was added to survive. A test drives three calls
+through one permit on a single worker — that wedges the blocking version and
+passes for this one, so the test cannot pass by accident.
+
 **Credentials cannot reach the journal.** The API key lives in `ProviderConfig`,
 which is not part of any request. A test walks every field written to the
 journal and asserts none of them is credential-shaped; another greps the file
@@ -175,11 +197,21 @@ Done:
   CI grades every push against a committed baseline and archives the table
 - A price table, and per-call timings written into the journal, so a replayed
   run still reports the cost and latency the original run really had
-- 61 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
+- `when_all` and `Nursery`: a batch can be wider than the pool, a failure is
+  reported in task order rather than in whatever order the scheduler picked, and
+  the first failure asks its siblings to stop
+- `--jobs N` on the eval, replaying a suite across workers while producing a
+  byte-identical report
+- `LimitedProvider` and `AsyncSemaphore`, which cap in-flight requests per
+  endpoint by parking the coroutine and not the thread. Tested, but nothing in
+  the CLI fans out yet, so today it is a component waiting for its caller
+- 82 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
   ASan + UBSan
 
 Next:
 
+- A concurrent runner that fans a task out across actors, which is what
+  `LimitedProvider` is waiting for
 - SSE streaming with a bounded channel and backpressure
 - Python bindings via pybind11
 - Structured traces, a viewer, and per-provider cost accounting
