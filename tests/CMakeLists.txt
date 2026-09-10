@@ -1,8 +1,10 @@
 add_executable(ash_tests
     agent_loop_test.cpp
     boundary_test.cpp
+    concurrency_test.cpp
     eval_test.cpp
     fixture_replay_test.cpp
+    limited_provider_test.cpp
     provider_test.cpp
     record_test.cpp
     task_test.cpp
@@ -23,4 +25,7 @@ ash_set_warnings(ash_tests)
 ash_set_sanitizers(ash_tests)
 
 include(Catch)
-catch_discover_tests(ash_tests)
+# A concurrency regression here shows up as a deadlock, and ctest would
+# otherwise sit on it for its 25-minute default. Every test in the suite
+# finishes in well under a second, so a minute means something is wedged.
+catch_discover_tests(ash_tests PROPERTIES TIMEOUT 60)

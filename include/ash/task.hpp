@@ -127,6 +127,22 @@ public:
 
     Awaiter operator co_await() && noexcept { return Awaiter{handle_}; }
 
+    // Begins the coroutine and returns as soon as it suspends or finishes,
+    // without waiting for the result. Called once, on a task nobody has
+    // started yet.
+    //
+    // The frame belongs to this Task, so the caller has to keep it alive until
+    // the coroutine reaches its final suspend -- start it and let the Task die
+    // while the coroutine is still parked somewhere and that parked handle
+    // points into freed memory. sync_wait() is the safe choice when the caller
+    // only wants the answer; this exists for a scheduler that wants to run many
+    // tasks on a pool at once and collect them afterwards.
+    void start() {
+        if (handle_ != nullptr) {
+            handle_.resume();
+        }
+    }
+
     // Runs the coroutine to completion on the calling thread, blocking while it
     // is suspended (for example, parked on a thread pool).
     T sync_wait() {
