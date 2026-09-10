@@ -1,0 +1,5 @@
+# The project targets Linux and its scripts are run directly, so line endings
+# are LF everywhere regardless of the host's core.autocrlf. Without this, a
+# clone on a machine configured with autocrlf=true rewrites the shebang of
+# tools/verify_replay.sh to "#!/usr/bin/env bash\r" and it stops executing.
+* text=auto eol=lf
