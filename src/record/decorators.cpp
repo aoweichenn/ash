@@ -25,7 +25,7 @@ std::int64_t elapsed_us(Clock::time_point start) noexcept {
 
 }  // namespace
 
-RecordingProvider::RecordingProvider(std::unique_ptr<ModelProvider> inner, Journal& journal, std::string actor)
+RecordingProvider::RecordingProvider(std::shared_ptr<ModelProvider> inner, Journal& journal, std::string actor)
     : inner_(std::move(inner)), journal_(journal), actor_(std::move(actor)) {}
 
 std::string_view RecordingProvider::name() const noexcept { return inner_->name(); }

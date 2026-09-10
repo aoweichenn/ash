@@ -30,14 +30,22 @@
       "inherits": "fedora-clang",
       "cacheVariables": {
         "ASH_SANITIZE": "ON",
-        "ASH_WERROR": "ON"
+        "ASH_WERROR": "ON",
+        "ASH_BUILD_PYTHON": "OFF"
       }
+    },
+    {
+      "name": "fedora-clang-python",
+      "displayName": "Fedora / Clang + Python bindings",
+      "inherits": "fedora-clang",
+      "cacheVariables": { "ASH_BUILD_PYTHON": "ON" }
     }
   ],
   "buildPresets": [
     { "name": "fedora-gcc", "configurePreset": "fedora-gcc" },
     { "name": "fedora-clang", "configurePreset": "fedora-clang" },
-    { "name": "fedora-clang-asan", "configurePreset": "fedora-clang-asan" }
+    { "name": "fedora-clang-asan", "configurePreset": "fedora-clang-asan" },
+    { "name": "fedora-clang-python", "configurePreset": "fedora-clang-python" }
   ],
   "testPresets": [
     {

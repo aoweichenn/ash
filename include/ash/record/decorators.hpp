@@ -21,7 +21,11 @@ namespace ash {
 
 class RecordingProvider final : public ModelProvider {
 public:
-    RecordingProvider(std::unique_ptr<ModelProvider> inner, Journal& journal, std::string actor);
+    // Shared and not unique, matching RecordingTool below. A caller that has to
+    // keep its own reference to the provider -- which is what a language binding
+    // does, since it is the garbage collector that decides when a Python object
+    // goes -- would otherwise have to give up the only owner it had.
+    RecordingProvider(std::shared_ptr<ModelProvider> inner, Journal& journal, std::string actor);
 
     [[nodiscard]] std::string_view name() const noexcept override;
     [[nodiscard]] const std::string& model() const noexcept override;
@@ -33,7 +37,7 @@ public:
     Task<ChatResponse> chat_stream(ChatRequest request, StreamSink& sink, std::stop_token stop = {}) override;
 
 private:
-    std::unique_ptr<ModelProvider> inner_;
+    std::shared_ptr<ModelProvider> inner_;
     Journal& journal_;
     std::string actor_;
 };
