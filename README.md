@@ -162,4 +162,6 @@ implementation; none of their code is used.
 
 ## License
 
-Not chosen yet.
+Apache-2.0. The patent grant is the reason: this is infrastructure that a
+company might want to depend on, and the explicit grant removes a question
+their legal review would otherwise have to ask.
