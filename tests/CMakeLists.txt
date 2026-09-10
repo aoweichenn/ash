@@ -1,6 +1,7 @@
 add_executable(ash_tests
     agent_loop_test.cpp
     boundary_test.cpp
+    cli_logic_test.cpp
     concurrency_test.cpp
     eval_test.cpp
     fixture_replay_test.cpp
@@ -20,6 +21,11 @@ target_link_libraries(ash_tests
         ash_core
         ash_eval
         Catch2::Catch2WithMain)
+
+# The CLI is not a library, so the parts of it that are decisions rather than
+# printing are tested by including the headers directly. Only the pure ones:
+# console.hpp reaches for <iostream> and has no business in a test.
+target_include_directories(ash_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/cli")
 
 # The boundary test reads the public headers from the source tree.
 target_compile_definitions(ash_tests PRIVATE ASH_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
