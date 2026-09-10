@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ASH_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "fedora-gcc",
+      "displayName": "Fedora / GCC",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "g++" }
+    },
+    {
+      "name": "fedora-clang",
+      "displayName": "Fedora / Clang",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_CXX_COMPILER": "clang++" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "fedora-gcc", "configurePreset": "fedora-gcc" },
+    { "name": "fedora-clang", "configurePreset": "fedora-clang" }
+  ],
+  "testPresets": [
+    {
+      "name": "fedora-gcc",
+      "configurePreset": "fedora-gcc",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "fedora-clang",
+      "configurePreset": "fedora-clang",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
