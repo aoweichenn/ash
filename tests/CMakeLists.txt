@@ -6,6 +6,7 @@ add_executable(ash_tests
     eval_test.cpp
     fixture_replay_test.cpp
     limited_provider_test.cpp
+    line_reader_test.cpp
     provider_test.cpp
     record_test.cpp
     shell_tool_test.cpp
