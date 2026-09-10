@@ -140,6 +140,99 @@ cmake --build --preset fedora-clang-asan
 ctest --preset fedora-clang-asan
 ```
 
+## Python
+
+The runtime is embeddable, and the bindings are where that claim gets tested: a
+third consumer alongside the CLI and the eval harness, and like the harness one
+that the core may not reach back into. A journal committed to the repository
+replays from Python with no key, no network and no cost — which is what makes a
+recording a fixture rather than a sample:
+
+```python
+import ash
+
+run = ash.replay("examples/journals/openai.jsonl")
+assert run.stop_reason == "completed"
+assert run.tools_called == ["list_dir", "read_file", "write_file"]
+assert "SUMMARY.md" in run.answer
+```
+
+A tool is a Python function. The schema is read off the signature, so the
+declaration and the code cannot disagree, and an annotation that cannot be
+described is refused where the function is defined rather than turned into a
+plausible schema the model would call and get an argument error from:
+
+```python
+import os
+
+import ash
+
+@ash.tool
+def list_dir(path: str = ".") -> str:
+    """List the entries of a directory."""
+    return "\n".join(sorted(os.listdir(path)))
+
+tools = ash.ToolSet()
+tools.add(list_dir)
+
+agent = ash.Agent(
+    ash.openai_compatible(base_url="https://api.deepseek.com/v1",
+                          api_key=key, model="deepseek-chat"),
+    tools)
+
+run = agent.run("what is in this directory?", journal="demo.jsonl")
+```
+
+`demo.jsonl` then replays with `ash.replay`, exactly as one written by the CLI
+does. The recording is taken at the provider and tool seams, so it has no idea
+which language drove the run.
+
+Watching a run and stopping one are the two things that are easier from here
+than from anywhere else:
+
+```python
+run = agent.run(task, on_text=print)              # the answer as it arrives
+run = agent.run(task, on_event=events.append)     # every event, as a dict
+
+token = ash.CancelToken()
+threading.Timer(30, token.cancel).start()
+run = agent.run(task, cancel=token)               # ends as "cancelled", keeping what it had
+```
+
+Watching changes nothing: a run with callbacks writes the journal a run without
+them wrote, byte for byte — the same claim `tools/verify_streaming.sh` makes
+about `--stream`, made again on the other side of the language boundary.
+Cancellation is a token rather than a callback because a callback only ever
+fires once the model has started talking, and the case most worth interrupting
+is the one where it has not: the token reaches libcurl's progress callback, so
+a run waiting on a silent socket stops in about a second rather than at its
+two-minute timeout.
+
+The eval harness is reachable too, so a project can keep its grading rules in a
+suite file and run them from its own test suite:
+
+```python
+report = ash.eval.run_suite("examples/suites/core.json")
+assert report.failed == 0
+assert report.passed == len(report.jobs)
+```
+
+To build the bindings and run the suite:
+
+```bash
+sudo dnf install -y python3-devel python3-pytest     # or: apt install python3-dev python3-pytest
+cmake --preset fedora-clang-python
+cmake --build --preset fedora-clang-python
+ctest --preset fedora-clang-python                   # the C++ tests and pytest
+./tools/verify_python.sh                             # the end-to-end gate
+```
+
+`ASH_BUILD_PYTHON` is off by default, and the pybind11 fetch is behind it, so a
+checkout without Python development headers configures and builds exactly as it
+did before. `bindings/python/tests/` is the example — there is no separate demo
+directory, because a suite that has to keep passing is a better worked example
+than a script that has to keep being read.
+
 ## Design
 
 **Interception sits at the seam, not the wire.** The journal records
@@ -209,9 +302,13 @@ could be forgotten.
 code, eval types, or anything that prints to the console — it returns data and
 lets a consumer decide what to do with it. The eval harness therefore lives in
 a top-level `eval/` and consumes the runtime like any other program, rather
-than forcing every embedder to compile a suite parser and a price table. A test
-enforces the boundary, and the test is checked against a deliberate violation
-so it cannot pass vacuously.
+than forcing every embedder to compile a suite parser and a price table, and
+the bindings live in `bindings/python` for the same reason. A test enforces the
+boundary, and the test is checked against a deliberate violation so it cannot
+pass vacuously. The bindings are that claim's real test rather than its
+restatement: an interpreter is a consumer that shares no build system, no
+memory model and no error handling with the runtime, and everything it needs
+had to already be in the public surface.
 
 ## Status
 
@@ -250,14 +347,19 @@ Done:
 - Cancellation that runs end to end: a `stop_token` reaches libcurl's progress
   callback, a stopped transfer is reported as stopped rather than failed, and a
   run cut short ends as `cancelled` keeping what it had produced
-- 133 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
-  ASan + UBSan
+- pybind11 bindings: replay, provider and agent, Python functions as tools,
+  streaming callbacks, cancellation, and the eval harness, all behind one
+  `ASH_BUILD_PYTHON` that is off by default. A Python tool's schema is derived
+  from its signature, a recording made from Python replays like any other, and
+  `tools/verify_python.sh` is the end-to-end check
+- 134 tests under `ctest`: 133 in C++ under both GCC and Clang, and the 69
+  Python tests registered as one more — with `-Werror`, zero warnings, and
+  clean under ASan + UBSan
 
 Next:
 
 - A concurrent runner that fans a task out across actors, which is what
   `LimitedProvider` is waiting for
-- Python bindings via pybind11
 - Structured traces, a viewer, and per-provider cost accounting
 
 ## Layout
@@ -267,9 +369,10 @@ include/ash/     the public surface, and only that
 src/             core/ model/ tool/ record/ io/
 eval/            the eval harness -- a consumer of the runtime, never part of it
 apps/cli/        the ash command
+bindings/python/ pybind11 bindings and their pytest suite -- another consumer
 tests/           Catch2 suite
-tools/           the offline stub server, the replay determinism check, and the
-                 streaming equivalence check
+tools/           the offline stub server, the replay determinism check, the
+                 streaming equivalence check, and the python bindings check
 ```
 
 ## Reading

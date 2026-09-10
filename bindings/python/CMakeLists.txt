@@ -78,3 +78,47 @@ add_custom_target(ash_python_package ALL
 # module was built for instead of whatever python3 happens to resolve to.
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/python-interpreter.txt"
      "${Python_EXECUTABLE}\n")
+
+# The pytest suite, as a ctest test, so that `ctest --preset fedora-clang-python`
+# is the whole gate rather than the C++ tests and a step someone has to remember.
+#
+# Registered only if the interpreter can import pytest, and said out loud either
+# way. A suite that is silently not registered is the worst of the options: the
+# run goes green, and the green means less than it looks like it means.
+if(ASH_BUILD_TESTS)
+    execute_process(
+        COMMAND "${Python_EXECUTABLE}" -c "import pytest; print(pytest.__version__)"
+        OUTPUT_VARIABLE ASH_PYTEST_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE ASH_PYTEST_STATUS)
+
+    if(NOT ASH_PYTEST_STATUS EQUAL 0)
+        message(STATUS "ash python bindings: pytest is not installed for "
+                       "${Python_EXECUTABLE}; the python tests are NOT registered")
+    else()
+        message(STATUS "ash python bindings: pytest ${ASH_PYTEST_VERSION}")
+
+        # The package's parent directory, which is what PYTHONPATH has to name
+        # for `import ash` to find build/<preset>/bindings/python/ash/.
+        set(ASH_PYTEST_ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}"
+                                   "ASH_REPO=${PROJECT_SOURCE_DIR}")
+
+        # Pointed at the CLI built here, not at the one in the default preset's
+        # build directory: this preset builds its own, and a test that only ran
+        # after a second configure-and-build would be a test that mostly did not.
+        if(TARGET ash)
+            list(APPEND ASH_PYTEST_ENVIRONMENT "ASH_CLI=$<TARGET_FILE:ash>")
+        endif()
+
+        add_test(NAME python_bindings.pytest
+                 COMMAND "${Python_EXECUTABLE}" -m pytest "${CMAKE_CURRENT_SOURCE_DIR}/tests" -q)
+
+        set_tests_properties(python_bindings.pytest PROPERTIES
+            ENVIRONMENT "${ASH_PYTEST_ENVIRONMENT}"
+            # Generous next to the ~3s the suite takes, because a test that is
+            # waiting out a socket timeout is the failure mode here and it should
+            # be reported as a failure rather than as a hang.
+            TIMEOUT 300)
+    endif()
+endif()

@@ -99,6 +99,43 @@ jobs:
       - name: Verify streaming equivalence
         run: ./tools/verify_streaming.sh build/fedora-clang/apps/cli/ash
 
+  python-bindings:
+    name: python bindings
+    runs-on: ubuntu-24.04
+    container: fedora:43
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The system Python, which in Fedora 43 is 3.14. That is the point of this
+      # job as much as the bindings are: it is the interpreter a user is most
+      # likely to have, and pybind11 is pinned to a version that supports it.
+      # python3-pytest comes from dnf rather than pip so the suite runs against
+      # the same interpreter CMake configured the module for.
+      - name: Install dependencies
+        run: >
+          dnf install -y --setopt=install_weak_deps=False
+          clang cmake ninja-build libcurl-devel openssl-devel git
+          python3-devel python3-pytest
+
+      - name: Configure
+        run: cmake --preset fedora-clang-python -DASH_WERROR=ON
+
+      - name: Build
+        run: cmake --build --preset fedora-clang-python
+
+      # The C++ tests and the pytest suite together: the bindings link the same
+      # libraries the CLI does, so a change that breaks one usually breaks both.
+      - name: Test
+        run: ctest --preset fedora-clang-python --output-on-failure
+
+      # The end-to-end gate. Records a run from Python, shuts the stub server
+      # down, replays it, and checks that a run with callbacks wrote the journal
+      # a run without them wrote. Fails rather than skips when pytest is
+      # missing, which is why it is installed above.
+      - name: Verify the python bindings
+        run: ./tools/verify_python.sh
+
   eval-offline:
     name: eval (offline, no key)
     runs-on: ubuntu-24.04
