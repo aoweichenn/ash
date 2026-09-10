@@ -4,6 +4,7 @@
 // lives under include/ash, and a test enforces that: a program embedding the
 // runtime should not have to compile a suite parser or a price table.
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -77,5 +78,16 @@ struct SuiteReport {
 
 // Replays every job from its journal. No network, no filesystem writes, no key.
 [[nodiscard]] SuiteReport run_suite(const Suite& suite);
+
+// The same suite across `jobs` workers. Exactly one takes the sequential path
+// and never starts a thread; zero means one worker per core.
+//
+// The report is identical either way -- same job order, same totals, same
+// latencies -- because every field in it comes from a journal rather than from
+// the clock, and a batch that finished out of order is put back into suite
+// order before anything is written down. Only `wall_us` differs, and it is
+// neither serialized nor diffed, because a per-job wall time measured under
+// contention is a fact about the machine, not about the suite.
+[[nodiscard]] SuiteReport run_suite(const Suite& suite, std::size_t jobs);
 
 }  // namespace ash::eval

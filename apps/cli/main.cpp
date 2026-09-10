@@ -59,6 +59,7 @@ usage:
 
 options for `eval`:
   --suite <path>         the suite to run (required)
+  --jobs <n>             replay n jobs at once; 0 means one per core (default 1)
   --baseline <path>      a report from an earlier run; regressions set exit 1
   --json <path>          write this run's report, for use as a later baseline
 
@@ -336,17 +337,23 @@ struct EvalOptions {
     std::string suite_path;
     std::string baseline_path;
     std::string json_path;
+    std::size_t jobs = 1;  // one replays here and starts no pool at all
 };
 
 void print_eval_usage() {
-    std::cout << R"(usage: ash eval --suite <path> [--json <path>] [--baseline <path>]
+    std::cout << R"(usage: ash eval --suite <path> [--jobs <n>] [--json <path>] [--baseline <path>]
 
   --suite <path>         the suite to run (required)
+  --jobs <n>             replay n jobs at once; 0 means one per core (default 1)
   --baseline <path>      a report from an earlier run; regressions set exit 1
   --json <path>          write this run's report, for use as a later baseline
 
 Every job replays a journal, so this needs no API key, no network, and no
 budget. Exit status is 0 only when every job passed and nothing regressed.
+
+--jobs changes how long the suite takes and nothing else: the report is
+assembled in suite order and every number in it comes from a recording, so a
+parallel run and a serial one produce the same file.
 )";
 }
 
@@ -433,6 +440,20 @@ int eval_command(const std::vector<std::string>& args) {
             if (!take_value(options.baseline_path)) return 2;
         } else if (arg == "--json") {
             if (!take_value(options.json_path)) return 2;
+        } else if (arg == "--jobs") {
+            std::string value;
+            if (!take_value(value)) return 2;
+            try {
+                const long parsed = std::stol(value);
+                if (parsed < 0) {
+                    std::cerr << "ash: --jobs cannot be negative\n";
+                    return 2;
+                }
+                options.jobs = static_cast<std::size_t>(parsed);
+            } catch (const std::exception&) {
+                std::cerr << "ash: --jobs expects a number, got '" << value << "'\n";
+                return 2;
+            }
         } else {
             std::cerr << "ash: unknown option '" << arg << "'\n";
             return 2;
@@ -446,7 +467,7 @@ int eval_command(const std::vector<std::string>& args) {
     }
 
     const ash::eval::Suite suite = ash::eval::load_suite(options.suite_path);
-    const ash::eval::SuiteReport report = ash::eval::run_suite(suite);
+    const ash::eval::SuiteReport report = ash::eval::run_suite(suite, options.jobs);
     print_report_table(report);
 
     if (!options.json_path.empty()) {

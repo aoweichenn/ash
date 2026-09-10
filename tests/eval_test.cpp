@@ -170,6 +170,36 @@ TEST_CASE("the committed suite replays offline and passes every check") {
     }
 }
 
+TEST_CASE("a suite replayed in parallel produces the same report as a serial one") {
+    ash::eval::Suite suite;
+    suite.name = "ordering";
+
+    // Six jobs over the same journal with distinct ids. Replayed at once they
+    // finish in some other order, so an id list that comes back in suite order
+    // is the ordering guarantee doing its job rather than the scheduler's luck.
+    for (int i = 0; i < 6; ++i) {
+        ash::eval::Job job;
+        job.id = "job-" + std::to_string(i);
+        job.journal = fs::path{ASH_SOURCE_DIR} / "examples" / "journals" / "openai.jsonl";
+        job.checks.stop_reason = "completed";
+        suite.jobs.push_back(std::move(job));
+    }
+
+    const nlohmann::json serial = nlohmann::json(ash::eval::run_suite(suite, 1));
+    const nlohmann::json parallel = nlohmann::json(ash::eval::run_suite(suite, 6));
+    const nlohmann::json per_core = nlohmann::json(ash::eval::run_suite(suite, 0));
+
+    // Byte for byte, not field by field: the claim is that --jobs is invisible
+    // in the report, and nothing that legitimately differs is serialized --
+    // wall_us is measured and deliberately left out of the file.
+    CHECK(serial.dump() == parallel.dump());
+    CHECK(serial.dump() == per_core.dump());
+
+    for (std::size_t i = 0; i < suite.jobs.size(); ++i) {
+        CHECK(parallel.at("jobs").at(i).at("id").get<std::string>() == suite.jobs[i].id);
+    }
+}
+
 TEST_CASE("a check that does not hold fails the job and explains why") {
     ash::eval::Suite suite;
     suite.name = "tampered";

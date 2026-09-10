@@ -8,11 +8,14 @@
 #include <string>
 #include <vector>
 
+#include "ash/concurrency.hpp"
 #include "ash/cost.hpp"
+#include "ash/io/thread_pool.hpp"
 #include "ash/model/provider.hpp"
 #include "ash/record/journal.hpp"
 #include "ash/record/replay_run.hpp"
 #include "ash/runtime.hpp"
+#include "ash/task.hpp"
 
 namespace ash::eval {
 
@@ -170,88 +173,136 @@ std::int64_t SuiteReport::latency_percentile_us(double percentile) const {
     return sorted[index - 1];
 }
 
+namespace {
+
+// One job's result plus the timings that may or may not be allowed into the
+// report, kept together so a job can be run on another thread and merged back
+// without the merge having to re-derive anything.
+struct JobOutcome {
+    JobResult result;
+    std::vector<std::int64_t> latencies;
+    bool replayed = false;
+};
+
+JobOutcome run_job(const Job& job) {
+    JobOutcome outcome;
+    outcome.result.id = job.id;
+
+    // Latencies only reach the report once the journal has replayed, so a job
+    // that diverged cannot contribute timings from a run that did not happen.
+    JobResult& result = outcome.result;
+
+    const WallClock::time_point start = WallClock::now();
+    try {
+        const Journal journal = Journal::load(job.journal);
+
+        for (const Event& event : journal.events()) {
+            if (event.actor != job.actor) {
+                continue;
+            }
+            if (const auto* model_call = std::get_if<ModelCallRecord>(&event.payload)) {
+                outcome.latencies.push_back(model_call->duration_us);
+            }
+        }
+
+        const ReplayOutcome replay = replay_run(journal, job.actor);
+        const AgentResult& run = replay.result;
+        outcome.replayed = true;
+
+        result.stop_reason = run.stop_reason;
+        result.steps = static_cast<int>(run.steps.size());
+        result.prompt_tokens = run.usage.prompt_tokens;
+        result.completion_tokens = run.usage.completion_tokens;
+        result.cost_usd = estimate_cost_usd(journal.header().model, run.usage.prompt_tokens,
+                                            run.usage.completion_tokens);
+        for (const std::int64_t latency : outcome.latencies) {
+            result.model_latency_us += latency;
+        }
+
+        const Checks& checks = job.checks;
+        if (checks.stop_reason && run.stop_reason != *checks.stop_reason) {
+            result.failures.push_back("expected stop_reason '" + *checks.stop_reason + "' but got '" +
+                                      run.stop_reason + "'");
+        }
+        if (checks.max_steps && result.steps > *checks.max_steps) {
+            result.failures.push_back("took " + std::to_string(result.steps) + " steps, over the budget of " +
+                                      std::to_string(*checks.max_steps));
+        }
+        check_final_message(checks, run, result.failures);
+        check_tools_called(checks, run, result.failures);
+        check_forbidden_tools(checks, run, result.failures);
+        check_wrote_file(checks, run, result.failures);
+
+        if (checks.max_cost_usd) {
+            if (result.cost_usd) {
+                if (*result.cost_usd > *checks.max_cost_usd) {
+                    result.failures.push_back("cost $" + std::to_string(*result.cost_usd) + " is over the budget");
+                }
+            } else {
+                // Saying nothing would read as a pass.
+                result.failures.push_back("no price is known for model '" + journal.header().model +
+                                          "', so the cost budget could not be checked");
+            }
+        }
+    } catch (const std::exception& error) {
+        // A journal that will not replay is a failed job, not a crashed
+        // harness: the suite should report it and carry on to the others.
+        result.failures.push_back(std::string{"replay failed: "} + error.what());
+    }
+
+    result.wall_us = elapsed_us(start);
+    result.passed = result.failures.empty();
+    return outcome;
+}
+
+// A replay is in-memory by construction -- ReplayingProvider and
+// ReplayingTool answer from the cursor and never reach the network or the
+// filesystem -- so a job holds no state another job could see. That is what
+// makes running several at once safe rather than merely fast.
+Task<JobOutcome> run_job_async(Job job) { co_return run_job(job); }
+
+void append_job(SuiteReport& report, JobOutcome outcome) {
+    if (outcome.replayed) {
+        report.model_call_latencies_us.insert(report.model_call_latencies_us.end(), outcome.latencies.begin(),
+                                              outcome.latencies.end());
+    }
+    report.jobs.push_back(std::move(outcome.result));
+}
+
+}  // namespace
+
 SuiteReport run_suite(const Suite& suite) {
     SuiteReport report;
     report.suite = suite.name;
-
     for (const Job& job : suite.jobs) {
-        JobResult result;
-        result.id = job.id;
+        append_job(report, run_job(job));
+    }
+    return report;
+}
 
-        // Latencies only reach the report once the journal has replayed, so a
-        // job that diverged cannot contribute timings from a run that did not
-        // happen.
-        std::vector<std::int64_t> latencies;
-        bool replayed = false;
-
-        const WallClock::time_point start = WallClock::now();
-        try {
-            const Journal journal = Journal::load(job.journal);
-
-            for (const Event& event : journal.events()) {
-                if (event.actor != job.actor) {
-                    continue;
-                }
-                if (const auto* model_call = std::get_if<ModelCallRecord>(&event.payload)) {
-                    latencies.push_back(model_call->duration_us);
-                }
-            }
-
-            const ReplayOutcome outcome = replay_run(journal, job.actor);
-            const AgentResult& run = outcome.result;
-            replayed = true;
-
-            result.stop_reason = run.stop_reason;
-            result.steps = static_cast<int>(run.steps.size());
-            result.prompt_tokens = run.usage.prompt_tokens;
-            result.completion_tokens = run.usage.completion_tokens;
-            result.cost_usd = estimate_cost_usd(journal.header().model, run.usage.prompt_tokens,
-                                                run.usage.completion_tokens);
-            for (const std::int64_t latency : latencies) {
-                result.model_latency_us += latency;
-            }
-
-            const Checks& checks = job.checks;
-            if (checks.stop_reason && run.stop_reason != *checks.stop_reason) {
-                result.failures.push_back("expected stop_reason '" + *checks.stop_reason + "' but got '" +
-                                          run.stop_reason + "'");
-            }
-            if (checks.max_steps && result.steps > *checks.max_steps) {
-                result.failures.push_back("took " + std::to_string(result.steps) + " steps, over the budget of " +
-                                          std::to_string(*checks.max_steps));
-            }
-            check_final_message(checks, run, result.failures);
-            check_tools_called(checks, run, result.failures);
-            check_forbidden_tools(checks, run, result.failures);
-            check_wrote_file(checks, run, result.failures);
-
-            if (checks.max_cost_usd) {
-                if (result.cost_usd) {
-                    if (*result.cost_usd > *checks.max_cost_usd) {
-                        result.failures.push_back("cost $" + std::to_string(*result.cost_usd) + " is over the budget");
-                    }
-                } else {
-                    // Saying nothing would read as a pass.
-                    result.failures.push_back("no price is known for model '" + journal.header().model +
-                                              "', so the cost budget could not be checked");
-                }
-            }
-        } catch (const std::exception& error) {
-            // A journal that will not replay is a failed job, not a crashed
-            // harness: the suite should report it and carry on to the others.
-            result.failures.push_back(std::string{"replay failed: "} + error.what());
-        }
-
-        if (replayed) {
-            report.model_call_latencies_us.insert(report.model_call_latencies_us.end(), latencies.begin(),
-                                                  latencies.end());
-        }
-
-        result.wall_us = elapsed_us(start);
-        result.passed = result.failures.empty();
-        report.jobs.push_back(std::move(result));
+SuiteReport run_suite(const Suite& suite, std::size_t jobs) {
+    // Exactly one, not "at most one": zero means one worker per core, which is
+    // the pool's convention and is not the sequential path.
+    if (jobs == 1 || suite.jobs.size() <= 1) {
+        return run_suite(suite);
     }
 
+    ThreadPool pool{jobs};
+    std::vector<Task<JobOutcome>> tasks;
+    tasks.reserve(suite.jobs.size());
+    for (const Job& job : suite.jobs) {
+        tasks.push_back(run_job_async(job));
+    }
+
+    // when_all returns in task order, so the report is assembled the same way
+    // it would be sequentially no matter which job finished first.
+    std::vector<JobOutcome> outcomes = when_all(pool, std::move(tasks));
+
+    SuiteReport report;
+    report.suite = suite.name;
+    for (JobOutcome& outcome : outcomes) {
+        append_job(report, std::move(outcome));
+    }
     return report;
 }
 
