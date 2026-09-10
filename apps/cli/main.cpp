@@ -291,14 +291,6 @@ void print_result(const ash::AgentResult& result, bool shown_live = false) {
               << result.usage.completion_tokens << ")\n";
 }
 
-[[nodiscard]] ash::ToolRegistry make_builtin_tools() {
-    ash::ToolRegistry tools;
-    tools.add(ash::make_read_file_tool());
-    tools.add(ash::make_write_file_tool());
-    tools.add(ash::make_list_dir_tool());
-    return tools;
-}
-
 int run_command(const std::vector<std::string>& args) {
     RunOptions options;
     options.base_url = env_or("ASH_BASE_URL", std::string{kDefaultBaseUrl});
@@ -356,7 +348,7 @@ int run_command(const std::vector<std::string>& args) {
         provider = std::make_unique<ash::RecordingProvider>(std::move(provider), *journal, std::string{kActor});
     }
 
-    ash::ToolRegistry tools = make_builtin_tools();
+    ash::ToolRegistry tools = ash::make_builtin_tools();
     if (journal.has_value()) {
         tools = ash::make_recording_registry(tools, *journal, std::string{kActor});
     }

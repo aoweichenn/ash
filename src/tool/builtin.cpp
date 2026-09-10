@@ -163,4 +163,12 @@ std::shared_ptr<Tool> make_list_dir_tool() {
                      [](const nlohmann::json& arguments, std::stop_token) { return list_dir(arguments); });
 }
 
+ToolRegistry make_builtin_tools() {
+    ToolRegistry tools;
+    tools.add(make_read_file_tool());
+    tools.add(make_write_file_tool());
+    tools.add(make_list_dir_tool());
+    return tools;
+}
+
 }  // namespace ash

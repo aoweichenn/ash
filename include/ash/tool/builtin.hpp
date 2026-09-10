@@ -17,4 +17,11 @@ namespace ash {
 // Lists a directory's entries, one per line, directories suffixed with '/'.
 [[nodiscard]] std::shared_ptr<Tool> make_list_dir_tool();
 
+// The tools a run gets when nobody is watching it: read a file, write a file,
+// list a directory. It is deliberately the whole set -- anything that reaches
+// past the filesystem would be a capability handed to a model with no one to
+// ask, which is the default most worth not having. An interactive session that
+// has a user to ask builds its own set on top of these.
+[[nodiscard]] ToolRegistry make_builtin_tools();
+
 }  // namespace ash

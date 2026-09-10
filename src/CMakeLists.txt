@@ -14,7 +14,8 @@ add_library(ash_core
     record/replay.cpp
     record/replay_run.cpp
     tool/builtin.cpp
-    tool/registry.cpp)
+    tool/registry.cpp
+    tool/shell.cpp)
 
 target_include_directories(ash_core
     PUBLIC

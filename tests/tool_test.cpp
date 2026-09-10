@@ -42,6 +42,19 @@ TEST_CASE("registry finds tools by name and exposes their specs") {
     CHECK(specs[1].input_schema["properties"].contains("path"));
 }
 
+TEST_CASE("the builtin set is the read-only three, and stays that way") {
+    // run_shell exists but is not in here: `ash run` has no one to ask, and a
+    // non-interactive path that silently hands the model a shell is the worst
+    // default available. The interactive session builds its own set.
+    const auto builtins = ash::make_builtin_tools();
+
+    CHECK(builtins.find("read_file") != nullptr);
+    CHECK(builtins.find("write_file") != nullptr);
+    CHECK(builtins.find("list_dir") != nullptr);
+    CHECK(builtins.find("run_shell") == nullptr);
+    CHECK(builtins.size() == 3);
+}
+
 TEST_CASE("read_file returns file contents") {
     const TempDir dir;
     const auto file = dir / "hello.txt";
