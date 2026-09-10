@@ -66,6 +66,17 @@ byte-identity check across 100 runs:
 ./tools/verify_replay.sh build/fedora-clang/apps/cli/ash
 ```
 
+`--stream` prints the answer while the model is still writing it:
+
+```bash
+ash run --stream "list the files here and summarize this project"
+```
+
+Tool activity is printed as it happens too, so a streamed transcript stays in
+the order the run produced it rather than showing the answer before the calls
+that led to it. Streaming changes what you see and nothing about what is
+recorded; `./tools/verify_streaming.sh` is the check that this stays true.
+
 `examples/journals/` holds two recordings made against a real endpoint — one per
 wire dialect. They are replayed by the test suite, which means a change to how
 the system prompt, the tool declarations, or the messages are assembled fails
@@ -162,6 +173,32 @@ under exactly the load the limit was added to survive. A test drives three calls
 through one permit on a single worker — that wedges the blocking version and
 passes for this one, so the test cannot pass by accident.
 
+**Streaming is a view of a call, not a second kind of call.** `chat_stream`
+returns the same `ChatResponse` that `chat` would have returned, reporting events
+through a sink on the way. The journal records the assembled response either
+way, so a streamed run and a plain one write byte-identical journals. That
+equality is what stops streaming from doubling the surface: the replaying
+provider needs no streaming path at all, the loop has one path through it rather
+than two that have to be kept in step, and nothing downstream can tell which
+kind of run produced a recording. `tools/verify_streaming.sh` runs the same task
+twice against the stub — once plain, once streamed — and diffs the journals, for
+both wire dialects.
+
+**Backpressure is the socket, so there is no queue to bound.** The plan for this
+milestone called for a bounded channel between the parser and the consumer.
+Building it turned out to be the wrong move, and the reason is worth writing
+down. libcurl hands the body to a synchronous write callback and will not read
+another byte of it until that callback returns. A slow sink therefore stops
+draining the socket, the socket stops accepting, and the endpoint's own flow
+control slows the model down — end to end, with nothing buffered in between. A
+bounded channel would sit inside that loop holding events libcurl is already
+holding, and its bound would be a number picked against no measurement. It would
+also be a second `LimitedProvider`: a component with a full test suite and no
+caller. What replaces it is a contract on the sink — `on_event` runs inside a C
+callback, so it must not let an exception escape and must not block indefinitely
+— and the accepted cost is that a slow consumer pushes back on the model rather
+than on a buffer, which is what was wanted in the first place.
+
 **Credentials cannot reach the journal.** The API key lives in `ProviderConfig`,
 which is not part of any request. A test walks every field written to the
 journal and asserts none of them is credential-shaped; another greps the file
@@ -205,17 +242,23 @@ Done:
 - `LimitedProvider` and `AsyncSemaphore`, which cap in-flight requests per
   endpoint by parking the coroutine and not the thread. Tested, but nothing in
   the CLI fans out yet, so today it is a component waiting for its caller
-- 82 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
+- SSE streaming: an incremental framer, a decoder for each wire dialect, and an
+  assembler that folds the events back into the response `chat` would have
+  returned. `--stream` prints the answer as it arrives; `chat_stream` is on the
+  `ModelProvider` seam, so a provider without it degrades to one event at the end
+  instead of not being callable
+- Cancellation that runs end to end: a `stop_token` reaches libcurl's progress
+  callback, a stopped transfer is reported as stopped rather than failed, and a
+  run cut short ends as `cancelled` keeping what it had produced
+- 133 tests, both GCC and Clang, `-Werror`, zero warnings, and clean under
   ASan + UBSan
 
 Next:
 
 - A concurrent runner that fans a task out across actors, which is what
   `LimitedProvider` is waiting for
-- SSE streaming with a bounded channel and backpressure
 - Python bindings via pybind11
 - Structured traces, a viewer, and per-provider cost accounting
-- Threading `stop_token` into libcurl's progress callback
 
 ## Layout
 
@@ -225,7 +268,8 @@ src/             core/ model/ tool/ record/ io/
 eval/            the eval harness -- a consumer of the runtime, never part of it
 apps/cli/        the ash command
 tests/           Catch2 suite
-tools/           the offline stub server and the replay determinism check
+tools/           the offline stub server, the replay determinism check, and the
+                 streaming equivalence check
 ```
 
 ## Reading
