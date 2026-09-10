@@ -1,0 +1,17 @@
+[
+  {
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "list_dir",
+        "arguments": { "path": "." }
+      }
+    ],
+    "usage": { "prompt": 120, "completion": 18 }
+  },
+  {
+    "content": "This directory holds README.md and a src/ folder containing main.cpp, so it is a small C++ project.",
+    "usage": { "prompt": 190, "completion": 26 }
+  }
+]
