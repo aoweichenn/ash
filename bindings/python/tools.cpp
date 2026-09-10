@@ -20,10 +20,8 @@ namespace {
 // py::object. Releasing the last reference to a Python object means
 // decrementing a refcount, which needs the GIL, and a tool can be destroyed at
 // a moment nobody controls -- when the last Agent holding it is collected, or
-// while the interpreter is shutting down. The first case is handled by taking
-// the GIL; the second cannot be, so the reference is let go instead. Leaking one
-// object once at exit is bounded; touching a refcount during finalization is
-// not.
+// while the interpreter is shutting down. See drop_reference, which is that
+// decision made once instead of once per holder.
 class PyCallable {
 public:
     explicit PyCallable(py::object function) : function_(std::move(function)) {}
@@ -31,17 +29,7 @@ public:
     PyCallable(const PyCallable&) = delete;
     PyCallable& operator=(const PyCallable&) = delete;
 
-    ~PyCallable() {
-        if (!function_) {
-            return;
-        }
-        if (!interpreter_running()) {
-            (void)function_.release();  // deliberately not decremented
-            return;
-        }
-        py::gil_scoped_acquire acquire;
-        function_ = py::object();
-    }
+    ~PyCallable() { drop_reference(function_); }
 
     [[nodiscard]] py::handle get() const { return function_; }
 

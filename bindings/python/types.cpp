@@ -88,6 +88,18 @@ bool interpreter_running() {
 #endif
 }
 
+void drop_reference(py::object& object) {
+    if (!object) {
+        return;
+    }
+    if (!interpreter_running()) {
+        (void)object.release();  // deliberately not decremented
+        return;
+    }
+    py::gil_scoped_acquire acquire;
+    object = py::object();
+}
+
 py::handle cancelled_exception() { return py::handle(g_cancelled); }
 
 bool is_cancelled(const py::error_already_set& error) {

@@ -62,6 +62,11 @@
       "name": "fedora-clang-asan",
       "configurePreset": "fedora-clang-asan",
       "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "fedora-clang-python",
+      "configurePreset": "fedora-clang-python",
+      "output": { "outputOnFailure": true }
     }
   ]
 }

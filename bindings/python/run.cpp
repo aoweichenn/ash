@@ -10,6 +10,7 @@
 #include "ash/record/journal.hpp"
 #include "ash/record/replay_run.hpp"
 #include "provider.hpp"
+#include "stream.hpp"
 #include "tools.hpp"
 
 namespace ash::python {
@@ -54,7 +55,10 @@ public:
     [[nodiscard]] Result run(const std::string& task,
                              const std::optional<std::string>& journal_path,
                              const std::optional<std::string>& system_prompt,
-                             const std::optional<int>& max_steps) const {
+                             const std::optional<int>& max_steps,
+                             CancelToken* cancel,
+                             py::object on_text,
+                             py::object on_event) const {
         AgentOptions options;
         if (system_prompt.has_value()) {
             options.system_prompt = *system_prompt;
@@ -90,13 +94,40 @@ public:
             tools = make_recording_registry(tools, *journal, std::string{kActor});
         }
 
+        // Every run has a stop source, whether or not the caller brought one,
+        // because a callback that raises has to have something to cancel. The
+        // caller's token, when there is one, is that same object -- so a timer
+        // thread calling cancel() and a callback raising reach the same source.
+        CancelToken local_token;
+        CancelToken& token = cancel != nullptr ? *cancel : local_token;
+
+        // Installed only when asked for. The sink takes the GIL once per event
+        // from inside libcurl's write callback, so a caller that wants the
+        // answer and not the play-by-play should not pay for it -- and, more to
+        // the point, should not be slowed down by whichever Python thread
+        // happens to be holding the GIL at that moment.
+        std::optional<PythonSink> sink;
+        if (!on_text.is_none() || !on_event.is_none()) {
+            sink.emplace(std::move(on_text), std::move(on_event), token);
+        }
+
         AgentResult outcome;
         {
             // Released for the length of the run. The coroutine body runs on
-            // this thread, so every callback that needs Python -- and there are
-            // none yet -- would re-acquire the GIL itself.
+            // this thread, so the callbacks above re-acquire the GIL themselves
+            // and none of them is ever called from a thread the interpreter does
+            // not already know.
             py::gil_scoped_release release;
-            outcome = run_agent(*provider, tools, task, options).sync_wait();
+            outcome = run_agent(*provider, tools, task, options, token.token(),
+                                sink.has_value() ? &*sink : nullptr)
+                          .sync_wait();
+        }
+        if (sink.has_value()) {
+            // Whatever a callback raised. Raised here rather than where it
+            // happened because the exception holds Python references, and this
+            // is the first moment since the run began that the GIL is safely
+            // back in hand.
+            sink->rethrow_if_failed();
         }
 
         Result result;
@@ -124,7 +155,8 @@ void register_run(py::module_& m) {
         .def(py::init<Provider, ToolSet>(), py::arg("provider"), py::arg("tools") = ToolSet{})
         .def("run", &Agent::run, py::arg("task"), py::kw_only(),
              py::arg("journal") = py::none(), py::arg("system_prompt") = py::none(),
-             py::arg("max_steps") = py::none(),
+             py::arg("max_steps") = py::none(), py::arg("cancel") = py::none(),
+             py::arg("on_text") = py::none(), py::arg("on_event") = py::none(),
              R"(Run the agent loop until the model answers without calling a tool.
 
 With journal= a path, everything the run could not recompute on its own -- every
@@ -136,6 +168,22 @@ the CLI.
 
 Stops at max_steps, or when the model stops asking for tools. The result's
 stop_reason says which happened.
+
+on_text= is called with each piece of the model's answer as it arrives, and
+on_event= with every event, as a dict whose "type" is one of text, tool_call,
+usage or done. Watching a run changes nothing about it: the journal written by a
+run with callbacks is byte for byte the journal written by the same run without
+them, because the recording is the assembled response and not the frames.
+
+Both are called on the thread performing the transfer, inside libcurl's write
+callback, with the GIL released and re-acquired around the call. So a callback
+must not block for long -- while it runs, nothing is reading the socket -- and
+must not assume it is on the main thread. An exception raised in a callback
+stops the run and is raised again from here, except for ash.Cancelled, which
+ends the run as cancelled instead of failing it.
+
+cancel= takes an ash.CancelToken and is the way to end a run from outside, from
+any thread; see CancelToken for why it is not a callback.
 )")
         .def("__repr__", &Agent::describe);
 

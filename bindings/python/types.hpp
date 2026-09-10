@@ -47,10 +47,22 @@ struct Result {
 // ash.Cancelled, raised by a callback, ends the run rather than failing it.
 [[nodiscard]] bool is_cancelled(const py::error_already_set& error);
 
+// Drops a reference to a Python object at a moment nobody controls: under the
+// GIL when the interpreter can still give it, and abandoned when it cannot.
+//
+// Every destructor that holds a Python reference past the point where a GIL is
+// guaranteed calls this instead of letting the member go on its own. Taking the
+// GIL while the interpreter is tearing down is worse than not taking it, and a
+// refcount decremented without one is undefined behaviour -- so the reference is
+// leaked instead. One object, once, at exit, is a bounded cost; the alternative
+// is not.
+void drop_reference(py::object& object);
+
 void register_types(py::module_& m);
-void register_run(py::module_& m);
-void register_tools(py::module_& m);
 void register_provider(py::module_& m);
+void register_tools(py::module_& m);
+void register_stream(py::module_& m);
+void register_run(py::module_& m);
 void register_eval(py::module_& m);
 
 }  // namespace ash::python
