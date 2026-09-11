@@ -196,9 +196,9 @@ extern "C" void ignore_interrupt(int) {}
 // A handler that does nothing and does not restart the read, which is what the
 // session installs: without it there is no EINTR to see, and with SA_RESTART
 // there is no interruption either.
-class InterruptHandler {
+class IgnoreInterrupt {
 public:
-    InterruptHandler() {
+    IgnoreInterrupt() {
         struct sigaction action {};
         action.sa_handler = ignore_interrupt;
         sigemptyset(&action.sa_mask);
@@ -206,10 +206,10 @@ public:
         REQUIRE(::sigaction(SIGINT, &action, &previous_) == 0);
     }
 
-    ~InterruptHandler() { ::sigaction(SIGINT, &previous_, nullptr); }
+    ~IgnoreInterrupt() { ::sigaction(SIGINT, &previous_, nullptr); }
 
-    InterruptHandler(const InterruptHandler&) = delete;
-    InterruptHandler& operator=(const InterruptHandler&) = delete;
+    IgnoreInterrupt(const IgnoreInterrupt&) = delete;
+    IgnoreInterrupt& operator=(const IgnoreInterrupt&) = delete;
 
 private:
     struct sigaction previous_ {};
@@ -221,7 +221,7 @@ TEST_CASE("a read that is interrupted says so instead of reporting a line") {
     // This is the whole reason the class exists, so it is tested with a real
     // signal rather than left to the one end-to-end check that also needs a
     // terminal, a model, and a user.
-    InterruptHandler handler;
+    IgnoreInterrupt handler;
     Pipe pipe;
 
     ash::cli::LineReader reader{pipe.read_fd()};
@@ -247,7 +247,7 @@ TEST_CASE("a read that is interrupted says so instead of reporting a line") {
 }
 
 TEST_CASE("an interruption drops the half-typed line rather than carrying it forward") {
-    InterruptHandler handler;
+    IgnoreInterrupt handler;
     Pipe pipe;
 
     ash::cli::LineReader reader{pipe.read_fd()};

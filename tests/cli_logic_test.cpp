@@ -108,14 +108,16 @@ TEST_CASE("a tool nobody has heard of is confirmed rather than run") {
 
 TEST_CASE("the history drops the system message and keeps the rest in order") {
     ash::AgentResult result;
-    result.transcript = {kSystem, user_text("hi"), assistant_text("hello"), user_text("more")};
+    result.transcript = {kSystem, user_text("hi"), assistant_text("hello"), user_text("more"),
+                         assistant_text("more back")};
 
     const std::vector<ash::Message> body = ash::cli::carry_forward_history(result);
 
-    REQUIRE(body.size() == 3);
+    REQUIRE(body.size() == 4);
     CHECK(body[0] == user_text("hi"));
     CHECK(body[1] == assistant_text("hello"));
     CHECK(body[2] == user_text("more"));
+    CHECK(body[3] == assistant_text("more back"));
 }
 
 TEST_CASE("the history keeps tool calls and tool results") {
@@ -141,13 +143,51 @@ TEST_CASE("a trailing assistant message with nothing in it is dropped") {
     // the Anthropic encoder turns it into {"role":"assistant","content":[]},
     // which the API refuses. One of these would poison every later turn.
     ash::AgentResult result;
-    result.transcript = {kSystem, user_text("hi"), assistant_text(""), assistant_text("")};
+    result.transcript = {kSystem, user_text("hi"), assistant_text("an answer"), assistant_text(""),
+                         assistant_text("")};
 
     const std::vector<ash::Message> body = ash::cli::carry_forward_history(result);
 
-    REQUIRE(body.size() == 1);
+    REQUIRE(body.size() == 2);
     CHECK(body[0] == user_text("hi"));
-    CHECK(body.back().role != ash::Role::kAssistant);
+    CHECK(body[1] == assistant_text("an answer"));
+}
+
+TEST_CASE("a user message the model never answered is dropped") {
+    // A turn interrupted before the model replied leaves the question last. Kept,
+    // it would open the next turn as two user messages in a row, which the API
+    // rejects -- and it would reject every turn after that too, because the pair
+    // stays in the history. Dropping it is the same choice the reader already
+    // makes for a half-typed line: the interruption means forget it.
+    ash::AgentResult result;
+    result.transcript = {kSystem, user_text("hi")};
+
+    CHECK(ash::cli::carry_forward_history(result).empty());
+}
+
+TEST_CASE("an interrupted turn keeps the work it finished") {
+    // Only the unanswered tail goes. A turn cut short after a tool ran leaves
+    // results the next request can carry, and dropping them would make the
+    // session ask for the same work a second time.
+    ash::AgentResult result;
+    result.transcript = {kSystem, user_text("list it"),
+                         assistant_tool_call("c1", "list_dir", {{"path", "."}}),
+                         tool_result("c1", "README.md")};
+
+    const std::vector<ash::Message> body = ash::cli::carry_forward_history(result);
+
+    REQUIRE(body.size() == 3);
+    CHECK(body.back().role == ash::Role::kTool);
+}
+
+TEST_CASE("a reply with nothing in it leaves nothing to continue from") {
+    // The model answered with nothing at all. Once the empty message is dropped
+    // the question is last, and it goes with it -- keeping it would make the next
+    // request unbuildable, and the model has already declined to answer it.
+    ash::AgentResult result;
+    result.transcript = {kSystem, user_text("hi"), assistant_text("")};
+
+    CHECK(ash::cli::carry_forward_history(result).empty());
 }
 
 TEST_CASE("an assistant message with tool calls is not empty, even with no text") {
@@ -163,15 +203,19 @@ TEST_CASE("an assistant message with tool calls is not empty, even with no text"
 TEST_CASE("an empty assistant message in the middle is left alone") {
     // Only the tail is trimmed. A blank turn in the middle is part of what was
     // said, and rewriting the middle of a conversation is not this function's
-    // business.
+    // business. The fixture ends on an answer for the same reason: a transcript
+    // that stops at a user message is the one shape the trim is for, so leaving
+    // it there would test the trim instead of what this is about.
     ash::AgentResult result;
-    result.transcript = {kSystem, user_text("hi"), assistant_text(""), user_text("still there")};
+    result.transcript = {kSystem, user_text("hi"), assistant_text(""), user_text("still there"),
+                         assistant_text("and answered")};
 
     const std::vector<ash::Message> body = ash::cli::carry_forward_history(result);
 
-    REQUIRE(body.size() == 3);
+    REQUIRE(body.size() == 4);
     CHECK(body[1] == assistant_text(""));
     CHECK(body[2] == user_text("still there"));
+    CHECK(body[3] == assistant_text("and answered"));
 }
 
 TEST_CASE("a transcript that does not open with a system message loses nothing") {

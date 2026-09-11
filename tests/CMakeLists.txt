@@ -14,6 +14,7 @@ add_executable(ash_tests
     sse_test.cpp
     stream_test.cpp
     task_test.cpp
+    terminal_test.cpp
     thread_pool_test.cpp
     tool_test.cpp
     version_test.cpp)

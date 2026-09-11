@@ -158,6 +158,15 @@ int chat_command(const std::vector<std::string>& args) {
         return 2;
     }
 
+    if (options.max_steps < 1) {
+        // A turn with no steps in it can never answer anything, and what it
+        // leaves behind is the user's own message with nothing after it -- which
+        // the history then drops, so the session would silently forget every
+        // question. Refusing says so once instead.
+        std::cerr << "ash: --max-steps must be at least 1\n";
+        return 2;
+    }
+
     PermissionMode mode = PermissionMode::kAsk;
     if (!options.mode.empty()) {
         const std::optional<PermissionMode> wanted = parse_mode(options.mode);
@@ -222,6 +231,12 @@ int chat_command(const std::vector<std::string>& args) {
     std::cout << "ash: " << cwd << "\n";
     std::cout << "ash: " << mode_description(gate.mode()) << "\n";
     std::cout << "ash: /help for commands, /exit to leave\n\n";
+
+    // Installed once for the whole session rather than per turn, so that Ctrl-C
+    // means the same thing wherever it lands. At the prompt it ends the session,
+    // because the read comes back with EINTR and says so; during a turn it ends
+    // the turn, because the watchdog below turns the flag into a stop request.
+    InterruptHandler interrupts;
 
     // The conversation so far, without the system message: the loop puts
     // options.system_prompt back at the front of every turn, so carrying it
@@ -298,16 +313,33 @@ int chat_command(const std::vector<std::string>& args) {
             continue;
         }
 
+        // A Ctrl-C that arrived before this turn is not this turn's to act on.
+        // Cleared here and again below, once the watchdog is gone, which narrows
+        // the window in which a signal belongs to neither turn without closing
+        // it: one landing in the gap is dropped rather than carried, and that is
+        // the direction that cannot end a turn nobody asked to end.
+        clear_interrupt();
+
+        std::stop_source stop;
         ash::AgentResult result;
-        try {
-            result = ash::run_agent(*provider, tools, body, line, agent_options, std::stop_token{},
-                                    options.stream ? &sink : nullptr)
-                         .sync_wait();
-        } catch (const std::exception& error) {
-            // One bad turn is not a reason to end the session: the transcript is
-            // left as it was, so the next message starts from where this one
-            // did rather than from a half-recorded failure.
-            std::cerr << "ash: " << error.what() << "\n";
+        std::string failure;
+        {
+            TurnWatchdog watchdog{stop};
+            try {
+                result = ash::run_agent(*provider, tools, body, line, agent_options, stop.get_token(),
+                                        options.stream ? &sink : nullptr)
+                             .sync_wait();
+            } catch (const std::exception& error) {
+                // One bad turn is not a reason to end the session: the transcript
+                // is left as it was, so the next message starts from where this
+                // one did rather than from a half-recorded failure.
+                failure = error.what();
+            }
+        }
+        clear_interrupt();
+
+        if (!failure.empty()) {
+            std::cerr << "ash: " << failure << "\n";
             continue;
         }
 

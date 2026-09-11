@@ -112,7 +112,7 @@ enum class PermissionMode { kAsk, kEdits, kYolo };
 
 // The body of the conversation so far, ready to open the next turn with.
 //
-// Two things happen here and both are load-bearing.
+// Three things happen here and all of them are load-bearing.
 //
 // The system message is dropped, because the loop puts `options.system_prompt`
 // back at the front of every turn and carrying the old one too would send it
@@ -120,11 +120,23 @@ enum class PermissionMode { kAsk, kEdits, kYolo };
 // turn's user text is not ours to discard, and a session that silently ate the
 // first thing someone said would be a worse bug than a duplicate prompt.
 //
-// A trailing assistant message with no content and no tool calls is dropped as
-// well. The loop appends the model's reply as it received it, so a step that
-// ended in nothing leaves one behind -- and the Anthropic encoder writes that
-// as {"role":"assistant","content":[]}, which the real API refuses. Left in, one
-// empty reply would break every later turn of the session, not just its own.
+// Then the unfinished tail goes: whatever is left at the end that the next
+// request cannot open with. There are two shapes of it and they are one rule.
+//
+// An assistant message with no content and no tool calls is what the loop leaves
+// behind when a step ends in nothing. The Anthropic encoder writes it as
+// {"role":"assistant","content":[]}, which the real API refuses -- so left in, a
+// single empty reply would break every later turn of the session and not just
+// its own.
+//
+// A user message with no answer after it means the turn was interrupted before
+// the model replied, and it goes for the same reason the reader drops a
+// half-typed line on Ctrl-C: the interruption means "forget what I was saying".
+// Keeping it would cost more than the words, because the next turn would then
+// open with two user messages in a row -- which the API rejects, and it would
+// reject every turn after that too, since the pair stays in the history. A model
+// that answers with nothing at all leaves this same shape once its empty reply
+// is dropped, which is why this is one rule and not two.
 [[nodiscard]] inline std::vector<ash::Message> carry_forward_history(const ash::AgentResult& result) {
     std::size_t begin = 0;
     if (!result.transcript.empty() && result.transcript.front().role == ash::Role::kSystem) {
@@ -138,7 +150,8 @@ enum class PermissionMode { kAsk, kEdits, kYolo };
         const ash::Message& last = body.back();
         const bool empty_assistant =
             last.role == ash::Role::kAssistant && last.content.empty() && last.tool_calls.empty();
-        if (!empty_assistant) {
+        const bool unanswered_user = last.role == ash::Role::kUser;
+        if (!empty_assistant && !unanswered_user) {
             break;
         }
         body.pop_back();
