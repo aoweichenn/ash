@@ -42,6 +42,18 @@ if [[ ! -x "$ASH" ]]; then
 fi
 ASH=$(realpath "$ASH")
 
+# See verify_replay.sh: a missing tool must be reported as a missing tool, not
+# as the divergence this script exists to detect.
+require() {
+    for tool in "$@"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "verify_streaming: $tool is not installed" >&2
+            exit 2
+        fi
+    done
+}
+require diff python3
+
 WORK=$(mktemp -d)
 STUB_PID=""
 cleanup() {

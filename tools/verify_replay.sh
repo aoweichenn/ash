@@ -32,6 +32,21 @@ fi
 # a relative path would stop pointing at the binary.
 ASH=$(realpath "$ASH")
 
+# A check that cannot run is not a check, and it must not look like one that
+# ran. Without this, a missing `cmp` is caught by the comparison below as a
+# non-zero status and reported as replays that differ -- this script saying the
+# output is not deterministic when it never read the output at all. Being
+# wrong in that direction is worse than not running.
+require() {
+    for tool in "$@"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "verify_replay: $tool is not installed" >&2
+            exit 2
+        fi
+    done
+}
+require cmp diff python3
+
 WORK=$(mktemp -d)
 STUB_PID=""
 cleanup() {
