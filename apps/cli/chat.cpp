@@ -57,8 +57,12 @@ in a session:
   /help                    this list
   /exit                    leave (also /quit, or an end of input)
 
-The whole conversation is kept in memory and sent with every message, and there
-is no compaction: /clear is the only way to make it shorter.
+--mode yolo runs shell commands on this machine without asking first. Use it
+somewhere you do not mind losing.
+
+Ctrl-C ends the turn you are in, or leaves if you are at the prompt. The whole
+conversation is kept in memory and sent with every message, and there is no
+compaction: /clear is the only way to make it shorter.
 )";
 }
 

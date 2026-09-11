@@ -140,6 +140,95 @@ cmake --build --preset fedora-clang-asan
 ctest --preset fedora-clang-asan
 ```
 
+## The session
+
+`ash` with no arguments is an interactive coding agent in the current directory.
+It takes the flags `run` takes and streams by default, because watching the
+answer arrive is most of what an interactive agent is for:
+
+```
+$ ash
+ash: openai-compatible / deepseek-chat -> https://api.deepseek.com/v1
+ash: /home/you/project
+ash: ask -- every file write and every command is confirmed with you
+ash: /help for commands, /exit to leave
+
+> what does this project do?
+  -> list_dir {"path":"."}
+  <- README.md
+
+  -> read_file {"path":"README.md"}
+  <- demo
+
+It is a C++20 agent runtime that records a run to a journal and replays it
+offline, byte for byte.
+
+ash: stop=completed steps=1 tokens=773 (prompt 714, completion 59)
+> add a version file
+  -> write_file {"content":"0.1.0\n","path":"VERSION"}
+
+  write_file {"content":"0.1.0\n","path":"VERSION"}
+  allow? [y]es / [n]o / [a]lways for this tool > y
+  <- wrote 6 bytes to VERSION
+Done -- VERSION now holds 0.1.0.
+
+ash: stop=completed steps=1 tokens=1055 (prompt 1014, completion 41)
+>
+```
+
+Every turn sends the whole exchange so far, which is the difference between a
+session and a series of one-shot runs: you correct the agent instead of
+restating the task, and it keeps what it already learned about the project.
+There is no compaction, so the transcript grows until it no longer fits and
+`/clear` is the only thing that shortens it. That is a v1 limit rather than an
+oversight — summarising a conversation is a second model call with its own
+failure modes, and a session that quietly rewrites what you said is worse than
+one that runs out of room.
+
+A command name is never sent to the model. `/mode`, `/clear`, `/help` and `/exit`
+are the session's, and so is anything else starting with a slash, so a typo
+there is a typo rather than a question about slashes.
+
+### Permissions
+
+A call that changes something is put to you first, and the mode decides how much
+of that there is:
+
+| mode | `write_file` | `run_shell` | `read_file`, `list_dir` |
+|---|---|---|---|
+| `ask` | confirm | confirm | never |
+| `edits` | allow | confirm | never |
+| `yolo` | allow | allow | never |
+
+`/mode` with no argument cycles and says what the new one allows. The answer to
+a prompt is `y`, `n`, or `a` — yes for the rest of the session for that tool.
+Reads are never worth a prompt: they change nothing, and asking about them only
+teaches you to answer without reading.
+
+The middle mode is `edits` and not `auto` because what it auto-approves is
+writing files; running a command still asks. A name that promised more than the
+mode does is a name that gets someone's project rewritten by something they
+thought they had already agreed to.
+
+**`yolo` means it.** The agent runs commands on your machine without asking.
+That is useful in a scratch directory and a bad idea anywhere else, and nothing
+in the program stops you.
+
+### Ctrl-C
+
+Ctrl-C means two things, and which one depends on where the session is. At an
+empty prompt it leaves. During a turn it ends the turn — the model call, a
+command that is running, all of it — and puts you back at the prompt with
+whatever the turn had already produced.
+
+That split is not a convenience. At the prompt there is a read in progress, and
+the read reports the interruption itself, which is the only way to notice a
+Ctrl-C on an empty line. During a turn there is no read, so the signal has to be
+caught and turned into a stop request for the run. A turn running a command that
+would have taken thirty seconds is back in about 0.2s; a turn waiting on a model
+that has not started answering is back in about 1s, which is libcurl's
+progress-callback cadence.
+
 ## Python
 
 The runtime is embeddable, and the bindings are where that claim gets tested: a
@@ -256,6 +345,18 @@ wrap the real tools. The agent loop has no idea which mode it is in, which is
 why a recorded run and a replayed run take the same code path — and why the
 replay is a real test of the loop rather than a re-enactment of a log.
 
+**A refused tool call is data, not an error.** Approval is one more decorator
+over the tool registry — the same shape as the recording and printing ones,
+driven by a callback — so the mechanism sits in the library while the policy
+(`ask`, `edits`, `yolo`) stays in the CLI, where a session's ideas about
+permission belong. A refusal comes back as an ordinary tool result carrying
+`is_error`, which means the model reads it the way it reads any other failure
+and can try something else, instead of the run ending. The one piece of state
+that does not fit a stateless decorator — "yes, always, for this tool" — belongs
+to the session object that owns the callback: a tool that remembered the user's
+answer would be a tool that could not be shared across threads, and that
+immutability is what the whole registry design rests on.
+
 **Determinism is per actor, not per thread.** Chasing bit-identical thread
 interleaving is a research project. Instead each logical task gets an `actor_id`
 and its own monotonic sequence, and replay orders by `(actor, seq)`. The order
@@ -298,7 +399,19 @@ also be a second `LimitedProvider`: a component with a full test suite and no
 caller. What replaces it is a contract on the sink — `on_event` runs inside a C
 callback, so it must not let an exception escape and must not block indefinitely
 — and the accepted cost is that a slow consumer pushes back on the model rather
-than on a buffer, which is what was wanted in the first place.
+than on a buffer, which was what was wanted in the first place.
+
+**Ctrl-C is a flag and a watchdog, because a handler may not take a lock.**
+Stopping a run means calling into a `stop_source`, which takes a lock and runs
+callbacks; a signal handler that did that could deadlock against the very thread
+it interrupted. So the handler sets a `volatile sig_atomic_t` and does nothing
+else, and a thread that lives for exactly one turn polls it every five
+milliseconds and makes the call. That lifetime is the whole of the story that a
+Ctrl-C aimed at one turn cannot end the next: the signal is only turned into a
+stop request while something is watching, and between turns nothing is.
+`SA_RESTART` is deliberately left off, because the read at the prompt has to see
+`EINTR` to know the user interrupted an empty line — and a read the kernel
+restarts for you never comes back to say so.
 
 **Credentials cannot reach the journal.** The API key lives in `ProviderConfig`,
 which is not part of any request. A test walks every field written to the
@@ -355,12 +468,18 @@ Done:
 - Cancellation that runs end to end: a `stop_token` reaches libcurl's progress
   callback, a stopped transfer is reported as stopped rather than failed, and a
   run cut short ends as `cancelled` keeping what it had produced
+- `ash` with no arguments is an interactive session: a coding-agent prompt, a
+  streamed answer per turn, the whole conversation carried into every request, a
+  shell tool alongside the filesystem ones, and approval modes that a refusal
+  turns into an ordinary tool result. Ctrl-C ends the turn rather than the
+  session, and it lands on whichever half of the run is in the way — a command
+  that is executing or a model call that has not started answering
 - pybind11 bindings: replay, provider and agent, Python functions as tools,
   streaming callbacks, cancellation, Ctrl-C, and the eval harness, all behind one
   `ASH_BUILD_PYTHON` that is off by default. A Python tool's schema is derived
   from its signature, a recording made from Python replays like any other, and
   `tools/verify_python.sh` is the end-to-end check
-- 134 tests under `ctest`: 133 in C++ under both GCC and Clang, and the 73
+- 193 tests under `ctest`: 192 in C++ under both GCC and Clang, and the 73
   Python tests registered as one more — with `-Werror`, zero warnings, and
   clean under ASan + UBSan
 
@@ -368,6 +487,7 @@ Next:
 
 - A concurrent runner that fans a task out across actors, which is what
   `LimitedProvider` is waiting for
+- Context compaction, so a long session keeps going instead of being cleared
 - Structured traces, a viewer, and per-provider cost accounting
 
 ## Layout
