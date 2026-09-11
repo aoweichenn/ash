@@ -10,6 +10,12 @@ two provider dialects differ.
     tools/stub_model.py --port 8099 --script tools/scripts/demo.json
     tools/stub_model.py --dialect anthropic --script tools/scripts/demo.json
 
+`--record` writes every request to one file when the server shuts down.
+`--dump-requests DIR` writes each one to its own file as it arrives, which is
+what a check needs when the request it cares about is the third of six and the
+session is still running: the later turns are the evidence, and waiting for the
+end to look at them is not possible from inside the run being checked.
+
 A request with `"stream": true` is answered as Server-Sent Events instead, in
 the frame sequence the matching real endpoint uses. Text and tool arguments are
 cut into small pieces rather than sent whole, because a stub that answered a
@@ -33,9 +39,17 @@ Script format (a JSON list; the last entry repeats once exhausted):
 
 import argparse
 import json
+import os
 import signal
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+def dump_request(directory, number, request):
+    """One file per request, named by the order it arrived in."""
+    path = os.path.join(directory, f"request-{number:04d}.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
 
 
 def render_openai(entry, model, index):
@@ -267,6 +281,7 @@ class StubHandler(BaseHTTPRequestHandler):
     dialect = "openai"
     requests = []
     calls = 0
+    dump_dir = ""
 
     # Keep-alive, so the streaming path can be written as chunked and the
     # non-streaming path stays exactly as it was.
@@ -307,6 +322,8 @@ class StubHandler(BaseHTTPRequestHandler):
         StubHandler.requests.append(request)
         index = min(StubHandler.calls, len(self.script) - 1)
         StubHandler.calls += 1
+        if StubHandler.dump_dir:
+            dump_request(StubHandler.dump_dir, StubHandler.calls, request)
 
         entry = StubHandler.script[index]
         model = request.get("model", "stub")
@@ -330,6 +347,8 @@ def main():
     parser.add_argument("--script", required=True, help="JSON file with a list of responses")
     parser.add_argument("--dialect", choices=sorted(RENDERERS), default="openai")
     parser.add_argument("--record", help="write every received request here on shutdown")
+    parser.add_argument("--dump-requests", metavar="DIR",
+                        help="write each received request to its own file in DIR, as it arrives")
     args = parser.parse_args()
 
     with open(args.script, encoding="utf-8") as handle:
@@ -337,6 +356,9 @@ def main():
     if not StubHandler.script:
         parser.error(f"script {args.script} is empty")
     StubHandler.dialect = args.dialect
+    if args.dump_requests:
+        os.makedirs(args.dump_requests, exist_ok=True)
+        StubHandler.dump_dir = args.dump_requests
 
     # Translate SIGTERM into the same path as Ctrl-C so --record always flushes.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))

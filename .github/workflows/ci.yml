@@ -66,8 +66,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --preset fedora-clang-asan --output-on-failure
 
+  # Everything here runs the real binary against the offline stub, with no API
+  # key and no network. Replay determinism is the headline, but streaming
+  # equivalence and the interactive session are the same kind of claim about the
+  # same binary, so they share one build rather than paying for a second.
   replay-determinism:
-    name: replay determinism (offline)
+    name: offline behaviour
     runs-on: ubuntu-24.04
     container: fedora:43
 
@@ -98,6 +102,15 @@ jobs:
       # a change that quietly made streaming a second kind of call fails here.
       - name: Verify streaming equivalence
         run: ./tools/verify_streaming.sh build/fedora-clang/apps/cli/ash
+
+      # The session, which is the one thing on this list a person drives rather
+      # than scripts. What it proves that the others cannot: the requests the
+      # session actually sends, read back from the stub's copies of them. A
+      # session that forgot the previous turn prints exactly the same output as
+      # one that remembered it, so the printed transcript is no evidence at all
+      # and the request bodies are the only place the difference shows.
+      - name: Verify the interactive session
+        run: ./tools/verify_chat.sh build/fedora-clang/apps/cli/ash
 
   python-bindings:
     name: python bindings

@@ -473,7 +473,10 @@ Done:
   shell tool alongside the filesystem ones, and approval modes that a refusal
   turns into an ordinary tool result. Ctrl-C ends the turn rather than the
   session, and it lands on whichever half of the run is in the way — a command
-  that is executing or a model call that has not started answering
+  that is executing or a model call that has not started answering.
+  `tools/verify_chat.sh` drives a session against the stub and reads back the
+  requests it sent, since a session that forgot the previous turn prints exactly
+  the same transcript as one that remembered it
 - pybind11 bindings: replay, provider and agent, Python functions as tools,
   streaming callbacks, cancellation, Ctrl-C, and the eval harness, all behind one
   `ASH_BUILD_PYTHON` that is off by default. A Python tool's schema is derived
@@ -500,7 +503,8 @@ apps/cli/        the ash command
 bindings/python/ pybind11 bindings and their pytest suite -- another consumer
 tests/           Catch2 suite
 tools/           the offline stub server, the replay determinism check, the
-                 streaming equivalence check, and the python bindings check
+                 streaming equivalence check, the interactive session check, and
+                 the python bindings check
 ```
 
 ## Reading
